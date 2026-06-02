@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SZTAKI LOD · AI Researcher</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+</head>
+<body>
+
+<!-- ═══════════════ NAVIGATION BAR ═══════════════ -->
+<nav id="navbar">
+    <a class="nav-logo" href="#">
+        <div class="nav-logo-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M12 2v4M12 18v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M2 12h4M18 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+            </svg>
+        </div>
+        <div class="nav-logo-text">
+            SZTAKI LOD
+            <span>Hungarian Cultural Heritage · v1</span>
+        </div>
+    </a>
+
+    <div class="nav-tabs">
+        <button class="nav-tab active" onclick="setTab(this, 'chat')">
+            <div class="nav-tab-dot" style="background:var(--accent)"></div>
+            Chat
+        </button>
+        <button class="nav-tab" onclick="setTab(this, 'graph')">
+            <div class="nav-tab-dot" style="background:var(--blue)"></div>
+            Knowledge Graph
+        </button>
+        <button class="nav-tab" onclick="setTab(this, 'sparql')">
+            <div class="nav-tab-dot" style="background:var(--green)"></div>
+            SPARQL Explorer
+        </button>
+    </div>
+
+    <div style="flex:1"></div>
+
+    <div class="nav-status">
+        <div class="status-dot"></div>
+        Llama 3.1 · lod.sztaki.hu
+    </div>
+
+    <div class="nav-actions">
+        <button id="panel-toggle" class="active" onclick="togglePanel()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <path d="M15 3v18"/>
+            </svg>
+            Tools
+        </button>
+        <button class="nav-btn nav-btn-danger" onclick="resetSession()">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+            </svg>
+            New Session
+        </button>
+    </div>
+</nav>
+
+<!-- ═══════════════ APP BODY ═══════════════ -->
+<div id="app-body">
+
+    <!-- ── CHAT COLUMN ── -->
+    <div id="chat-col">
+
+        <div id="chat-window">
+            <!-- Welcome state shown before first message -->
+            <div id="welcome-state" class="empty-state">
+                <div class="empty-icon">🗄</div>
+                <div class="empty-title">SZTAKI LOD Knowledge Graph</div>
+                <div class="empty-sub">
+                    Ask anything about Hungarian radio shows, books, photos, and cultural heritage items
+                    from the National Digital Data Archive. I'll query the lod.sztaki.hu knowledge graph,
+                    generate visualizations, and expose the SPARQL so you can refine it directly.
+                </div>
+            </div>
+        </div>
+
+        <!-- live streaming phase indicator -->
+        <div id="stream-status">
+            <div class="stream-ping"></div>
+            <span id="stream-text">Thinking…</span>
+        </div>
+
+        <div id="loading">
+            <div class="loader-dots"><span></span><span></span><span></span></div>
+            <span id="loading-text">Querying knowledge graph…</span>
+        </div>
+
+        <div id="input-area">
+            <div id="input-row">
+                <textarea id="user-input" rows="1"
+                    placeholder="Ask about works, audio, authors, subjects, dates…"
+                    oninput="autoResize(this)"
+                    onkeydown="handleKey(event)"></textarea>
+                <button id="send-btn" onclick="askAgent()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 2L11 13M22 2 15 22 11 13 2 9l20-7z"/>
+                    </svg>
+                    Send
+                </button>
+            </div>
+            <div id="input-hint">
+                <span>↵ Send · Shift+↵ New line</span>
+                <span class="hint-chip" onclick="setInput('List 10 audio works with their titles, creators and duration format')">
+                    🎙 Radio shows
+                </span>
+                <span class="hint-chip" onclick="setInput('Show me works with their titles, publishers and publication dates as a bar chart')">
+                    📅 Works by date
+                </span>
+                <span class="hint-chip" onclick="setInput('Count how many items exist per dcmitype content type and show as a pie chart')">
+                    📊 Items by type
+                </span>
+            </div>
+        </div>
+
+        <!-- Scroll to bottom -->
+        <button id="scroll-btn" onclick="scrollBottom()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="m6 9 6 6 6-6"/>
+            </svg>
+        </button>
+    </div>
+
+    <!-- ── SIDE PANEL ── -->
+    <aside id="side-panel">
+
+        <!-- Tools section -->
+        <div class="panel-section">
+            <div class="panel-section-header" onclick="toggleSection(this)">
+                <div class="panel-section-title">
+                    <span class="section-icon">⚙</span>
+                    Active Tools
+                </div>
+                <span class="panel-chevron open">▼</span>
+            </div>
+            <div class="panel-body">
+                <div class="tool-card">
+                    <div class="tool-card-icon" style="background:rgba(61,214,140,.1);color:var(--green)">⬡</div>
+                    <div class="tool-card-text">
+                        <div class="tool-card-name">SPARQL Engine</div>
+                        <div class="tool-card-desc">Virtuoso · lod.sztaki.hu</div>
+                    </div>
+                    <div class="tool-status ts-on"></div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-icon" style="background:rgba(77,159,255,.1);color:var(--blue)">📊</div>
+                    <div class="tool-card-text">
+                        <div class="tool-card-name">Chart Renderer</div>
+                        <div class="tool-card-desc">Bar · Pie · Horizontal bar</div>
+                    </div>
+                    <div class="tool-status ts-blue"></div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-icon" style="background:rgba(240,192,64,.1);color:var(--accent)">🤖</div>
+                    <div class="tool-card-text">
+                        <div class="tool-card-name">Llama 3.1 Agent</div>
+                        <div class="tool-card-desc">Graph RAG · LangGraph</div>
+                    </div>
+                    <div class="tool-status ts-amber"></div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-icon" style="background:rgba(185,125,255,.1);color:var(--purple)">✏️</div>
+                    <div class="tool-card-text">
+                        <div class="tool-card-name">SPARQL Console</div>
+                        <div class="tool-card-desc">Edit &amp; re-run queries inline</div>
+                    </div>
+                    <div class="tool-status ts-purple"></div>
+                </div>
+                <div class="tool-card">
+                    <div class="tool-card-icon" style="background:rgba(61,214,140,.08);color:var(--green)">🔗</div>
+                    <div class="tool-card-text">
+                        <div class="tool-card-name">LOD Linker</div>
+                        <div class="tool-card-desc">DBpedia · NSZL (nektar.oszk.hu) · Lexvo</div>
+                    </div>
+                    <div class="tool-status ts-on"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Example prompts section -->
+        <div class="panel-section">
+            <div class="panel-section-header" onclick="toggleSection(this)">
+                <div class="panel-section-title">
+                    <span class="section-icon">💡</span>
+                    Example Queries
+                </div>
+                <span class="panel-chevron open">▼</span>
+            </div>
+            <div class="panel-body">
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="List 15 works with their titles, content types and publication dates">
+                    <span class="prompt-chip-tag">🔍 Explore</span><br>
+                    List works with titles, types &amp; dates
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="Show me audio works with their titles, creators and duration format">
+                    <span class="prompt-chip-tag">🎙 Audio</span><br>
+                    Radio/audio works with duration
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="List works published in 2003 with their titles, publishers and dates">
+                    <span class="prompt-chip-tag">📅 By date</span><br>
+                    Works published in 2003
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="Count how many items exist per dcmitype content type and show as a pie chart">
+                    <span class="prompt-chip-tag">📊 Stats</span><br>
+                    Item counts per type (pie chart)
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="Find works about history with their titles, subjects and descriptions">
+                    <span class="prompt-chip-tag">🏷 Subject</span><br>
+                    Works about history
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="List works in Hungarian language with their titles, creators and series">
+                    <span class="prompt-chip-tag">🇭🇺 Hungarian</span><br>
+                    Hungarian-language works &amp; series
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="Find works by author Sümegi with their titles, dates and access URLs">
+                    <span class="prompt-chip-tag">👤 Author</span><br>
+                    Works by Sümegi with access URLs
+                </div>
+                <div class="prompt-chip" onclick="setInput(this.dataset.q)" data-q="Show all available properties for work item 92 from lod.sztaki.hu">
+                    <span class="prompt-chip-tag">🔗 Full entry</span><br>
+                    All properties of a single work
+                </div>
+            </div>
+        </div>
+
+        <!-- Database info section -->
+        <div class="panel-section">
+            <div class="panel-section-header" onclick="toggleSection(this)">
+                <div class="panel-section-title">
+                    <span class="section-icon">🗄</span>
+                    Database Info
+                </div>
+                <span class="panel-chevron open">▼</span>
+            </div>
+            <div class="panel-body">
+                <div class="db-stat">
+                    <span class="db-stat-label">Endpoint</span>
+                    <span class="db-stat-value" style="font-size:9px;">lod.sztaki.hu/sparql</span>
+                </div>
+                <div class="db-stat">
+                    <span class="db-stat-label">Triples</span>
+                    <span class="db-stat-value">~11 million</span>
+                </div>
+                <div class="db-stat">
+                    <span class="db-stat-label">Ontology</span>
+                    <span class="db-stat-value">DCTerms · FOAF · DBpedia · Lexvo</span>
+                </div>
+                <div class="db-stat">
+                    <span class="db-stat-label">Source</span>
+                    <span class="db-stat-value">NDA Hungary</span>
+                </div>
+                <div class="db-stat">
+                    <span class="db-stat-label">Outlinks</span>
+                    <span class="db-stat-value">~561,000</span>
+                </div>
+                <div class="db-stat">
+                    <span class="db-stat-label">Status</span>
+                    <span class="db-stat-badge">● Live</span>
+                </div>
+                <div class="db-stat">
+                    <span class="db-stat-label">Types</span>
+                    <span class="db-stat-value" style="font-size:9px;">Sound · Text · Image · Video</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tips section -->
+        <div class="panel-section" style="border-bottom:none; flex:1;">
+            <div class="panel-section-header" onclick="toggleSection(this)">
+                <div class="panel-section-title">
+                    <span class="section-icon">ℹ</span>
+                    How It Works
+                </div>
+                <span class="panel-chevron open">▼</span>
+            </div>
+            <div class="panel-body" style="gap:8px;">
+                <div style="font-size:11.5px; color:var(--text-dim); line-height:1.65;">
+                    <strong style="color:var(--accent)">Human-in-the-loop:</strong>
+                    Every database query exposes a live SPARQL Console.
+                    Edit the generated query and hit <strong style="color:var(--text)">Run ↵</strong>
+                    to re-execute it instantly.
+                </div>
+                <div style="font-size:11.5px; color:var(--text-dim); line-height:1.65;">
+                    <strong style="color:var(--blue)">Visualizations:</strong>
+                    Ask for charts by type — bar, pie, or horizontal bar — and the agent
+                    will automatically render one from the query results.
+                </div>
+                <div style="font-size:11.5px; color:var(--text-dim); line-height:1.65;">
+                    <strong style="color:var(--green)">Schema:</strong>
+                    Works are typed <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">dbo:Work</code>
+                    + <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">schema:CreativeWork</code>
+                    with <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">dcterms:</code> properties
+                    (title, creator, subject, date, type, format, identifier, language, isPartOf).
+                    Authors are linked via <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">dcterms:creator</code>
+                    and carry <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">foaf:name</code>,
+                    <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">dcterms:alternative</code>
+                    (Hungarian name order), and
+                    <code style="font-family:var(--font-mono);font-size:10px;color:var(--blue)">owl:sameAs</code>
+                    links to external authorities (NSZL, VIAF).
+                </div>
+            </div>
+        </div>
+
+    </aside>
+
+</div><!-- /#app-body -->
+
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────────
+marked.setOptions({ breaks: true, gfm: true });
+
+const PALETTE = [
+    '#f0c040','#4d9fff','#3dd68c','#f04f5a','#b97dff',
+    '#f4845f','#4cc9f0','#a8d8a8','#f7b731','#748ffc',
+    '#ff9f43','#00cec9','#fd79a8','#6c5ce7','#55efc4'
+];
+
+let busy = false;
+let panelOpen = true;
+
+// ── Tabs ──────────────────────────────────────────────────────────────────
+function setTab(el, tab) {
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+
+    if (tab === "graph") {
+        window.location.href = "/graph";
+    }
+
+    if (tab === "sparql") {
+        window.location.href = "/sparql";
+    }
+
+    if (tab === "chat") {
+        window.location.href = "/";
+    }
+}
+
+// ── Panel toggle ──────────────────────────────────────────────────────────
+function togglePanel() {
+    panelOpen = !panelOpen;
+    const panel = document.getElementById('side-panel');
+    const btn   = document.getElementById('panel-toggle');
+    panel.classList.toggle('collapsed', !panelOpen);
+    btn.classList.toggle('active', panelOpen);
+    document.getElementById('scroll-btn').style.right = (panelOpen ? 320 : 0) + 20 + 'px';
+}
+
+// ── Collapsible sections ──────────────────────────────────────────────────
+function toggleSection(header) {
+    const body    = header.nextElementSibling;
+    const chevron = header.querySelector('.panel-chevron');
+    body.classList.toggle('hidden');
+    chevron.classList.toggle('open');
+}
+
+// ── Input helpers ─────────────────────────────────────────────────────────
+function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 130) + 'px';
+}
+function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); askAgent(); }
+}
+function setInput(text) {
+    const el = document.getElementById('user-input');
+    el.value = text;
+    el.focus();
+    autoResize(el);
+}
+
+// ── Scroll tracking ────────────────────────────────────────────────────────
+const chatWin = () => document.getElementById('chat-window');
+function scrollBottom() {
+    const w = chatWin();
+    w.scrollTo({ top: w.scrollHeight, behavior: 'smooth' });
+}
+document.addEventListener('DOMContentLoaded', () => {
+    chatWin().addEventListener('scroll', () => {
+        const w = chatWin();
+        const atBottom = w.scrollHeight - w.scrollTop - w.clientHeight < 60;
+        document.getElementById('scroll-btn').classList.toggle('visible', !atBottom);
+    });
+});
+
+// ── Loading states ────────────────────────────────────────────────────────
+const loadingMessages = [
+    'Querying knowledge graph…',
+    'Generating SPARQL…',
+    'Fetching collections…',
+    'Processing results…',
+    'Synthesizing response…'
+];
+let loadingInterval;
+function showLoader() {
+    const el = document.getElementById('loading');
+    const txt = document.getElementById('loading-text');
+    el.classList.add('visible');
+    let i = 0;
+    txt.textContent = loadingMessages[0];
+    loadingInterval = setInterval(() => {
+        i = (i + 1) % loadingMessages.length;
+        txt.textContent = loadingMessages[i];
+    }, 2200);
+}
+function hideLoader() {
+    document.getElementById('loading').classList.remove('visible');
+    clearInterval(loadingInterval);
+}
+
+// ── Streaming send via Server-Sent Events ─────────────────────────────────
+async function askAgent(manualSparql = null) {
+    if (busy) return;
+
+    const input = document.getElementById('user-input');
+    const btn   = document.getElementById('send-btn');
+
+    let displayText, apiMessage;
+    if (manualSparql !== null) {
+        displayText = '↺ Running edited SPARQL query…';
+        apiMessage  = `EXACT_QUERY: ${manualSparql}`;
+    } else {
+        displayText = input.value.trim();
+        if (!displayText) return;
+        apiMessage  = displayText;
+        input.value = '';
+        input.style.height = 'auto';
+    }
+
+    // Remove welcome state on first message
+    const ws = document.getElementById('welcome-state');
+    if (ws) ws.remove();
+
+    appendBubble(displayText, 'user');
+    busy = true;
+    btn.disabled = true;
+    showLoader();
+    scrollBottom();
+
+    try {
+        const res = await fetch('/chat/stream', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ message: apiMessage }),
+        });
+
+        if (!res.ok) throw new Error(`Server error ${res.status}`);
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let   buffer  = '';
+
+        // Show live streaming badge
+        const statusEl = document.getElementById('stream-status');
+        const statusTx = document.getElementById('stream-text');
+        statusEl.classList.add('visible');
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            // Parse SSE frames
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop(); // keep incomplete tail
+
+            for (const frame of frames) {
+                const eventLine = frame.match(/^event:\s*(.+)$/m);
+                const dataLine  = frame.match(/^data:\s*(.+)$/ms);
+                if (!eventLine || !dataLine) continue;
+
+                const event = eventLine[1].trim();
+                let   data;
+                try { data = JSON.parse(dataLine[1].trim()); } catch { continue; }
+
+                if (event === 'status') {
+                    statusTx.textContent = data.text || '…';
+
+                } else if (event === 'done') {
+                    statusEl.classList.remove('visible');
+                    processResponse(data.response, data.sparql_query, data.viz);
+
+                } else if (event === 'error') {
+                    statusEl.classList.remove('visible');
+                    appendBubble(`⚠️ ${data.text}`, 'error');
+                }
+            }
+        }
+
+    } catch (err) {
+        document.getElementById('stream-status').classList.remove('visible');
+        appendBubble(`⚠️ ${err.message}`, 'error');
+        console.error(err);
+    } finally {
+        busy = false;
+        btn.disabled = false;
+        hideLoader();
+        scrollBottom();
+    }
+}
+
+// ── Parse & render response ────────────────────────────────────────────────
+function processResponse(raw, sparqlQuery, vizCfg = null) {
+    // Legacy: still handle inline signal if backend is old version
+    if (!vizCfg) {
+        const SIGNAL = 'UI_VISUALIZATION_SIGNAL:';
+        const idx = raw.indexOf(SIGNAL);
+        if (idx !== -1) {
+            const jsonPart = raw.slice(idx + SIGNAL.length).trim();
+            const start = jsonPart.indexOf('{');
+            const end   = findClosingBrace(jsonPart, start);
+            if (start !== -1 && end !== -1) {
+                try { vizCfg = JSON.parse(jsonPart.slice(start, end + 1)); } catch (_) {}
+            }
+            raw = raw.slice(0, idx).trim();
+        }
+    }
+
+    const displayText = (raw || '').trim() || 'Here is the data visualization:';
+    const bubbleId = appendBubble(marked.parse(displayText), 'bot');
+
+    if (sparqlQuery) injectSparqlConsole(bubbleId, sparqlQuery);
+    if (vizCfg)      injectChart(bubbleId, vizCfg);
+}
+
+// ── SPARQL Console ────────────────────────────────────────────────────────
+function injectSparqlConsole(bubbleId, code) {
+    const bubble   = document.getElementById(bubbleId);
+    const editorId = `editor-${bubbleId}`;
+
+    const div = document.createElement('div');
+    div.className = 'sparql-console';
+    div.innerHTML = `
+        <div class="sparql-header">
+            <div class="sparql-header-left">
+                <div class="sparql-header-icon">⬡</div>
+                <span class="sparql-label">SPARQL Console</span>
+                <span class="sparql-sublabel">· edit &amp; re-run</span>
+            </div>
+            <div class="sparql-actions">
+                <button class="sparql-btn sparql-btn-copy" onclick="copyQuery('${editorId}', this)">Copy</button>
+                <button class="sparql-btn sparql-btn-run"  onclick="runEdit('${editorId}')">Run ↵</button>
+            </div>
+        </div>
+        <textarea id="${editorId}" class="sparql-textarea" spellcheck="false">${escapeHtml(code)}</textarea>`;
+
+    bubble.appendChild(div);
+}
+
+function runEdit(editorId) {
+    const code = document.getElementById(editorId)?.value;
+    if (code) askAgent(code);
+}
+function copyQuery(editorId, btn) {
+    const code = document.getElementById(editorId)?.value || '';
+    navigator.clipboard.writeText(code).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+}
+
+// ── Chart injection ───────────────────────────────────────────────────────
+// ── Chart injection ───────────────────────────────────────────────────────
+function injectChart(bubbleId, cfg) {
+    const bubble   = document.getElementById(bubbleId);
+    const canvasId = `canvas-${bubbleId}`;
+
+    const container = document.createElement('div');
+    container.className = 'chart-container';
+    container.innerHTML = `
+        <div class="chart-header">
+            <div class="chart-title">${cfg.title || 'Data Distribution'}</div>
+            <div class="chart-type-badge">${cfg.type || 'bar'}</div>
+        </div>
+        <canvas id="${canvasId}"></canvas>`;
+    bubble.appendChild(container);
+
+    const colors = cfg.labels.map((_, i) => PALETTE[i % PALETTE.length]);
+
+    new Chart(document.getElementById(canvasId).getContext('2d'), {
+        type: cfg.type || 'bar',
+        data: {
+            labels: cfg.labels,
+            datasets: [{
+                label: cfg.title || 'Count',
+                data: cfg.values,
+                backgroundColor: colors.map(c => c + '28'),
+                borderColor: colors,
+                borderWidth: 2,
+                borderRadius: 5,
+                borderSkipped: false
+            }]
+        },
+        options: {
+            indexAxis: cfg.indexAxis || 'x',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: cfg.type === 'pie' || cfg.type === 'doughnut',
+                    labels: { color: '#6b7fa0', font: { family: 'JetBrains Mono', size: 10 } }
+                },
+                tooltip: {
+                    backgroundColor: '#111620',
+                    borderColor: '#2a3650',
+                    borderWidth: 1,
+                    titleColor: '#f0c040',
+                    bodyColor: '#c8d6eb',
+                    titleFont: { family: 'JetBrains Mono', size: 11 },
+                    bodyFont:  { family: 'Inter', size: 12 },
+                    padding: 10,
+                    cornerRadius: 6,
+                    callbacks: {
+                        // Title = the bar's own label (unique per bar)
+                        title: (items) => {
+                            return cfg.labels[items[0].dataIndex] || '';
+                        },
+                        // Body = hover detail if available, else just the value
+                        label: (item) => {
+                            const hover = cfg.hover && cfg.hover[item.dataIndex];
+                            if (hover) {
+                                // Split on ' | ' so each field is on its own line
+                                return hover.split(' | ');
+                            }
+                            return ` ${item.formattedValue}`;
+                        }
+                    }
+                }
+            },
+            scales: (cfg.type === 'pie' || cfg.type === 'doughnut') ? {} : {
+                x: {
+                    ticks: { color: '#3d4f6b', font: { family: 'JetBrains Mono', size: 9 },
+                             // Truncate long axis labels so they don't overlap
+                             callback: function(val, idx) {
+                                 const lbl = this.getLabelForValue(idx);
+                                 return lbl && lbl.length > 22 ? lbl.slice(0, 22) + '…' : lbl;
+                             }
+                           },
+                    grid: { color: '#1e2736' }
+                },
+                y: {
+                    beginAtZero: true,
+                    ticks: { color: '#3d4f6b', font: { family: 'JetBrains Mono', size: 9 },
+                             callback: function(val, idx) {
+                                 const lbl = this.getLabelForValue(idx);
+                                 return lbl && lbl.length > 22 ? lbl.slice(0, 22) + '…' : lbl;
+                             }
+                           },
+                    grid: { color: '#1e2736' }
+                }
+            }
+        }
+    });
+}
+
+// ── Bubble factory ────────────────────────────────────────────────────────
+function appendBubble(content, type) {
+    const win = chatWin();
+    const id  = `msg-${Date.now()}-${Math.random().toString(36).slice(2,5)}`;
+
+    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const row = document.createElement('div');
+    row.className = `msg-row ${type === 'user' ? 'user-row' : ''}`;
+
+    const avatarClass = type === 'user' ? 'avatar-user' : 'avatar-ai';
+    const avatarLabel = type === 'user' ? 'You' : 'AI';
+
+    const bubbleClass = type === 'user'  ? 'bubble-user'
+                      : type === 'error' ? 'bubble-error'
+                      :                    'bubble-ai';
+
+    const senderLabel = type === 'bot'
+        ? `<div class="bubble-sender">
+               <span class="sender-ai">SZTAKI LOD AI</span>
+               <span class="bubble-time">${now}</span>
+           </div>`
+        : '';
+
+    row.innerHTML = `
+        <div class="msg-avatar ${avatarClass}">${avatarLabel}</div>
+        <div id="${id}" class="bubble ${bubbleClass}">
+            ${senderLabel}
+            <div class="bubble-content">${content}</div>
+        </div>`;
+
+    win.appendChild(row);
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.getElementById(id)?.classList.add('visible');
+        scrollBottom();
+    }));
+
+    return id;
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────
+function findClosingBrace(str, start) {
+    let depth = 0;
+    for (let i = start; i < str.length; i++) {
+        if (str[i] === '{') depth++;
+        else if (str[i] === '}') { if (--depth === 0) return i; }
+    }
+    return -1;
+}
+function escapeHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function resetSession() {
+    try { await fetch('/reset', { method: 'POST' }); } catch (_) {}
+    const w = chatWin();
+    w.innerHTML = '';
+    const ws = document.createElement('div');
+    ws.id = 'welcome-state';
+    ws.className = 'empty-state';
+    ws.innerHTML = `
+        <div class="empty-icon">🗄</div>
+        <div class="empty-title">SZTAKI LOD Knowledge Graph</div>
+        <div class="empty-sub">
+            Ask anything about Hungarian radio shows, books, photos, and cultural heritage items
+            from the National Digital Data Archive. I'll query the lod.sztaki.hu knowledge graph,
+            generate visualizations, and expose the SPARQL so you can refine it directly.
+        </div>`;
+    w.appendChild(ws);
+}
+</script>
+</body>
+</html>
