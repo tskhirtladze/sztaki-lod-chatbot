@@ -1,0 +1,42 @@
+graph: http://lod.sztaki.hu/nda
+
+classes:
+
+  Person:
+    rdf_types:
+      - foaf:Person
+      - schema:Person
+      - dbo:Person
+
+    properties:
+      foaf:name: string
+      rdfs:label: string
+      dcterms:alternative: string
+      dbpedia:birthYear: integer
+      dbpedia:deathYear: integer
+      owl:sameAs: URI
+
+  Work:
+    rdf_types:
+      - dbo:Work
+      - schema:CreativeWork
+
+    properties:
+      dcterms:title: string
+      rdfs:label: string
+      dcterms:description: string
+      dcterms:date: date
+      dcterms:identifier: string
+      dcterms:format: string
+      dcterms:publisher: string
+      dcterms:subject: string
+      dcterms:language: URI
+
+    relationships:
+      creator:
+        predicate: dcterms:creator
+        target: Person
+
+      partOf:
+        predicate: dcterms:isPartOf
+        target: Work

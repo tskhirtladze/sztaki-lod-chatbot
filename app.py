@@ -4,16 +4,22 @@ import uuid
 import json
 import sqlite3
 import requests
-from typing import Annotated, TypedDict, Literal
+from collections import Counter
+from typing import Annotated, TypedDict
 
 from flask import Flask, render_template, request, jsonify, Response, session, stream_with_context, url_for
 from langchain_ollama import ChatOllama
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 import ssl
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import io
+import base64
+import matplotlib
+matplotlib.use("Agg")  # headless — this runs inside a Flask server process, no display
+import matplotlib.pyplot as plt
 from knowledge_graph import *
 
 
@@ -50,7 +56,169 @@ def validate_sparql(query: str) -> tuple[bool, str]:
 
 
 
-def generate_sparql(user_query: str) -> str:
+def check_data_availability(user_query: str) -> dict:
+    """
+    Runs BEFORE any SPARQL is written. Asks the LLM whether the user's question
+    maps to concepts that actually exist in this knowledge graph's schema —
+    nothing else. This stops the app from ever generating a query for something
+    the dataset simply doesn't track (weather, stock prices, unrelated topics).
+
+    The LLM is only shown the schema, and is explicitly told to explain itself
+    using ONLY the schema's own class/property names — it must not repeat or
+    "validate" any keyword from the user's question that isn't part of that
+    vocabulary, so an unavailable request doesn't come back sounding like an
+    endorsement of whatever the user happened to ask for.
+    """
+    prompt = f"""{CURATED_SCHEMA}
+
+{ENDPOINT_FACTS}
+
+You are checking whether a user's question can be answered using ONLY the
+classes and properties listed in the schema above — nothing else.
+
+User question: "{user_query}"
+
+Respond with ONLY a JSON object, no markdown, no extra text:
+{{"available": true or false, "reason": "one short sentence"}}
+
+Rules for "reason":
+- Refer ONLY to class/property names that appear in the schema above
+  (e.g. dcterms:subject, dbo:Work, dcmitype:Sound, foaf:name).
+- NEVER repeat, name, or "confirm" any topic/entity from the user's question
+  that is not itself part of the schema above.
+- If unavailable, just state that the schema has no matching class or
+  property — do not guess what the user might have meant.
+"""
+    try:
+        raw = llm.invoke(prompt).content.strip()
+        raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        parsed = json.loads(match.group(0) if match else raw)
+        return {
+            "available": bool(parsed.get("available", True)),
+            "reason": str(parsed.get("reason", ""))[:200],
+        }
+    except Exception as e:
+        print(f"[AVAILABILITY CHECK ERROR] {e}")
+        # Fail open — a parsing hiccup here shouldn't block a legitimate query
+        return {"available": True, "reason": ""}
+
+
+def _ensure_graph_scope(body: str) -> str:
+    """
+    Safety net: guarantee the query's WHERE body is wrapped in
+    GRAPH <http://lod.sztaki.hu/nda> { ... }, regardless of whether the LLM
+    actually included it. This endpoint hosts several unrelated named graphs
+    that reuse the same property names as this dataset, so an unscoped query
+    can silently mix in data from a totally different graph — this must never
+    be allowed through even if the prompt instruction gets ignored.
+    """
+    match = re.search(r"\bWHERE\s*\{", body, re.IGNORECASE)
+    if not match:
+        return body  # can't locate a WHERE block — leave as-is, execute_sparql will reject it
+
+    start = match.end()  # position right after the opening "{"
+    # Already scoped? (allow leading whitespace before GRAPH)
+    if re.match(r"\s*GRAPH\s+<", body[start:], re.IGNORECASE):
+        return body
+
+    # Find the matching closing brace via depth counting
+    depth = 1
+    i = start
+    while i < len(body) and depth > 0:
+        if body[i] == "{":
+            depth += 1
+        elif body[i] == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return body  # unbalanced braces — leave as-is, execute_sparql will reject it
+    inner_end = i - 1  # index of the matching "}"
+
+    inner = body[start:inner_end]
+    wrapped_inner = f" GRAPH <{NDA_GRAPH}> {{{inner}}} "
+    return body[:start] + wrapped_inner + body[inner_end + 1:]
+
+
+def resolve_entities(user_query: str) -> str:
+    """
+    Entity-resolution pass, run BEFORE SPARQL generation. Free-text SPARQL
+    generation fails silently when the user names something in a different
+    language or spelling than what's actually stored in the graph — e.g.
+    "Hungarian Central Statistical Office" vs. the graph's real stored value
+    "Központi Statisztikai Hivatal". Rather than trust the generator to guess
+    the exact stored string, this:
+      1. Asks the LLM for a few candidate search terms — including a
+         Hungarian translation/transliteration guess, since names in this
+         graph are almost entirely Hungarian.
+      2. Runs a real, cheap regex lookup against the graph for each candidate,
+         across every literal name-bearing property.
+      3. Returns whichever candidates actually matched something real, with
+         their exact stored string — THIS is what generate_sparql should
+         search for, not the user's original wording.
+    Returns grounding text to inject into the SPARQL prompt, or "" if nothing
+    matched (generate_sparql then falls back to the user's own wording).
+    """
+    prompt = f"""The user asked: "{user_query}"
+
+If this question names a specific entity (a person, organization, publisher,
+or work title), list up to 3 short candidate search terms for how it might
+actually be stored in a Hungarian cultural-heritage database — include a
+Hungarian translation/transliteration guess if it has an obvious Hungarian
+name, plus the original term as given.
+
+Respond with ONLY a JSON array of strings, no markdown, e.g.
+["Központi Statisztikai Hivatal", "Statisztikai Hivatal", "Central Statistical Office"]
+
+If no specific named entity is mentioned, respond with exactly: []
+"""
+    try:
+        raw = llm.invoke(prompt).content.strip()
+        raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        candidates = json.loads(match.group(0) if match else raw)
+        candidates = [c.strip() for c in candidates if isinstance(c, str) and c.strip()][:3]
+    except Exception as e:
+        print(f"[ENTITY CANDIDATES ERROR] {e}")
+        return ""
+
+    if not candidates:
+        return ""
+
+    found = []
+    for term in candidates:
+        # Keep the regex literal safe — strip characters that would break out
+        # of the quoted regex argument or have special regex meaning we don't want.
+        safe_term = re.sub(r'["\\.*+?()\[\]{}|^$]', " ", term).strip()
+        if not safe_term:
+            continue
+        lookup = SPARQL_PREFIXES + f"""
+SELECT DISTINCT ?label WHERE {{
+  GRAPH <{NDA_GRAPH}> {{
+    {{ ?s foaf:name ?label }}
+    UNION {{ ?s dcterms:alternative ?label }}
+    UNION {{ ?s dcterms:title ?label }}
+    UNION {{ ?s dcterms:publisher ?label }}
+    FILTER(regex(?label, "{safe_term}", "i"))
+  }}
+}} LIMIT 5
+"""
+        rows = execute_sparql(lookup)
+        if isinstance(rows, list):
+            for row in rows:
+                lbl = row.get("label")
+                if lbl and lbl not in found:
+                    found.append(lbl)
+
+    if not found:
+        return ""
+
+    return ("ENTITY RESOLUTION — these exact strings were found already stored "
+            "in the graph and match the user's question. Write your regex/exact "
+            f"match against THESE strings, not the user's original wording: {found[:5]}")
+
+
+def generate_sparql(user_query: str, entity_context: str = "", retry_hint: str = "") -> str:
     prompt = f"""{SPARQL_PREFIXES}
 
 {CURATED_SCHEMA}
@@ -63,19 +231,26 @@ You are a SPARQL expert for the SZTAKI LOD knowledge graph.
 
 Generate ONE valid SPARQL SELECT query for this question:
 "{user_query}"
-
+{("\n" + entity_context + "\n") if entity_context else ""}{("\nPREVIOUS ATTEMPT FAILED — " + retry_hint + "\n") if retry_hint else ""}
 STRICT INSTRUCTIONS:
 - ALWAYS write SELECT DISTINCT (never plain SELECT — data has duplicate triples)
+- ALWAYS wrap the query body in GRAPH <http://lod.sztaki.hu/nda> {{ ... }} — this
+  endpoint hosts other unrelated named graphs that reuse the same property names
 - ONLY use classes and properties from the schema above
 - Use dbo:Work to filter works
 - Use dcterms:title for titles
 - Use dcterms:date for dates
 - Use foaf:name for author names via JOIN on dcterms:creator
-- Use FILTER(CONTAINS(LCASE(?var), "keyword")) for text search
 - DO NOT invent properties
-- Use regex(?var, "keyword", "i") for text search — NOT CONTAINS(), NOT LCASE(), NOT STRSTARTS()
-- Use regex(?date, "^2003") for year filtering — NOT CONTAINS()
 - NEVER use BIND(), CONTAINS(), STRSTARTS(), LCASE(), SUBSTR() — this endpoint is SPARQL 1.0 only
+- PREFER exact matching over filtering: for known value sets (content type, language) use
+  an exact triple pattern or equality (?type = dcmitype:Sound), not a FILTER at all
+- For multi-valued properties (format, type, identifier) or year filtering, fetch the
+  property unfiltered with OPTIONAL and let the application split/compare the values —
+  do NOT add a FILTER just to isolate one of the values
+- ONLY use regex() as a last-resort fallback, and only for genuine free-text keyword
+  search on a user-supplied term (title/subject/description/author name substring
+  search) where no exact-match alternative exists: regex(?var, "keyword", "i")
 
 
 OUTPUT RULES:
@@ -109,10 +284,15 @@ OUTPUT RULES:
 
     # Safety fallback — if body is empty or has no SELECT, use a default query
     if not body or "SELECT" not in body.upper():
-        body = """SELECT DISTINCT ?item ?title WHERE {
-  ?item rdf:type dbo:Work ;
-        dcterms:title ?title .
-} LIMIT 15"""
+        body = f"""SELECT DISTINCT ?item ?title WHERE {{
+  GRAPH <{NDA_GRAPH}> {{
+    ?item rdf:type dbo:Work ;
+          dcterms:title ?title .
+  }}
+}} LIMIT 15"""
+
+    # Safety net — guarantee graph scoping even if the LLM forgot it
+    body = _ensure_graph_scope(body)
 
     return SPARQL_PREFIXES + "\n\n" + body
 
@@ -152,7 +332,7 @@ def execute_sparql(sparql: str) -> list | str:
         return f"SYSTEM_ERROR: {e}"
 
 
-# ── VISUALIZATION ─────────
+# ── VISUALIZATION ───────────────────────────────────────────────────────────
 def _is_numeric(val) -> bool:
     try:
         float(val)
@@ -161,99 +341,223 @@ def _is_numeric(val) -> bool:
         return False
 
 
+def _clean_label(val, fallback: str) -> str:
+    """Turn a raw cell value into a short, readable chart label."""
+    lbl = str(val) if val not in (None, "") else fallback
+    if lbl.startswith("http"):
+        lbl = lbl.rstrip("/").split("/")[-1].replace("_", " ")
+    return lbl[:50]
+
+
+def _plan_visualization(data: list, user_query: str, keys: list) -> dict | None:
+    """
+    Step 3 of the pipeline: after the SPARQL results come back, ask the LLM to
+    decide HOW to visualize them — whether a chart is even worth showing, what
+    chart type fits, which column is the category axis, which is the numeric
+    axis, and (step 4) a short caption describing what the chart shows.
+
+    Returns None if the LLM says a chart wouldn't add anything, or if its
+    answer can't be trusted (bad JSON, columns that don't actually exist).
+    """
+    sample = data[:8]
+    prompt = f"""You are deciding how to visualize the results of a knowledge-graph query.
+
+User question: "{user_query}"
+
+Result columns: {keys}
+Sample rows (JSON): {json.dumps(sample, ensure_ascii=False)}
+
+If a chart would meaningfully help answer the question, respond with ONLY this
+JSON object (no markdown, no extra text):
+{{"visualize": true, "chart_type": "bar" or "pie" or "line",
+  "label_column": "<one of the result columns above>",
+  "value_column": "<one of the result columns above holding real numbers, OR the literal string \\"COUNT\\">",
+  "description": "one short plain-English sentence describing what the chart shows"}}
+
+Most result sets are one row per item (e.g. one row per work) with no numeric
+column at all — that's normal, not a reason to skip the chart. In that case set
+value_column to the literal string "COUNT" and pick whichever label_column would
+group the rows into a meaningful breakdown (e.g. count of works per publisher,
+per content type, per year) — NOT a column where almost every row is unique
+(e.g. title, or a full timestamp), since that produces a flat, uninformative
+chart. Only use an actual column name for value_column when the data already
+contains real numbers to plot.
+
+If the data is not meaningfully chartable (e.g. a plain text list with no
+numeric or countable dimension), respond with ONLY:
+{{"visualize": false}}
+"""
+    try:
+        raw = llm.invoke(prompt).content.strip()
+        raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        plan = json.loads(match.group(0) if match else raw)
+    except Exception as e:
+        print(f"[VIZ PLAN ERROR] {e}")
+        return None
+
+    if not plan.get("visualize"):
+        return None
+    if plan.get("label_column") not in keys:
+        return None  # LLM hallucinated a column that isn't actually in the results
+    if plan.get("value_column") != "COUNT" and plan.get("value_column") not in keys:
+        return None  # same, for the value column — unless it's the COUNT sentinel
+    if plan.get("chart_type") not in ("bar", "pie", "line"):
+        plan["chart_type"] = "bar"
+    return plan
+
+
+def _best_count_column(data: list, keys: list) -> str | None:
+    """
+    Pick the categorical column that produces the most meaningful COUNT
+    breakdown, for use when no numeric column exists at all (the common case —
+    one row per item, e.g. one row per work).
+
+    Skips columns where every value is unique (e.g. title, a full timestamp) —
+    those produce a flat "1 each" chart that says nothing. Prefers columns with
+    fewer distinct buckets relative to the row count, since that's what makes a
+    COUNT breakdown actually informative (e.g. 13 works split 11/2 across two
+    publishers, rather than 13 works each on their own distinct date).
+    """
+    best_key, best_score = None, 0
+    for k in keys:
+        vals = [row.get(k) for row in data if row.get(k) not in (None, "")]
+        if not vals:
+            continue
+        counts = Counter(_clean_label(v, "") for v in vals)
+        distinct = len(counts)
+        if distinct < 2 or distinct == len(vals):
+            continue  # one bucket only, or every value is unique — no real repeats
+        score = len(vals) / distinct
+        if score > best_score:
+            best_key, best_score = k, score
+    return best_key
+
+
+def _render_matplotlib_chart(labels: list, values: list, chart_type: str, title: str) -> str:
+    """Render the chart with Matplotlib and return it as a base64 PNG data URI."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.5), dpi=130)
+
+    if chart_type == "pie":
+        ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90,
+               textprops={"fontsize": 8})
+        ax.axis("equal")
+    elif chart_type == "line":
+        ax.plot(labels, values, marker="o", color="#4d9fff")
+        ax.set_ylabel("Value")
+        plt.setp(ax.get_xticklabels(), rotation=40, ha="right", fontsize=8)
+    else:  # bar — go horizontal for many/long labels so they stay readable
+        horizontal = len(labels) > 6 or max((len(l) for l in labels), default=0) > 14
+        if horizontal:
+            ax.barh(labels, values, color="#f0c040")
+            ax.invert_yaxis()
+        else:
+            ax.bar(labels, values, color="#f0c040")
+            plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=8)
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)  # always free the figure — this runs inside a live server
+    buf.seek(0)
+    encoded = base64.b64encode(buf.read()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def try_build_visualization(data: list, user_query: str) -> dict | None:
+    """
+    Decide whether the retrieved rows are worth charting, and if so, render an
+    actual image with Matplotlib — not just a chart-library config blob.
+
+    Flow:
+      1. Cheap guard rail — need a list of at least 2 rows to chart anything.
+      2. Ask the LLM which columns to use and whether a chart is worth it at
+         all (_plan_visualization). Falls back to a simple numeric-column
+         heuristic only when there's an unambiguous numeric/aggregate column,
+         so genuinely non-chartable text lists still return None.
+      3. Build clean label/value arrays from the columns chosen.
+      4. Render with Matplotlib → base64 PNG.
+      5. Package the image together with the LLM's short description.
+    """
     if not isinstance(data, list) or len(data) < 2:
         return None
 
     keys = list({k for row in data for k in row.keys()})
-    numeric_keys = [
-        k for k in keys
-        if sum(1 for r in data if _is_numeric(r.get(k))) >= max(1, len(data) // 2)
-    ]
-    label_keys = [k for k in keys if k not in numeric_keys]
+    plan = _plan_visualization(data, user_query, keys)
 
-    # ── No numeric column → only chart if there's an explicit aggregate field ──
-    if not numeric_keys:
-        aggregate_keys = [
+    if plan is None:
+        numeric_keys = [
             k for k in keys
-            if k.lower() in ('count', 'total', 'score', 'num', 'amount', 'freq', 'n')
+            if sum(1 for r in data if _is_numeric(r.get(k))) >= max(1, len(data) // 2)
         ]
-        if not aggregate_keys:
-            return None  # pure text list - nothing meaningful to chart
+        aggregate_keys = [k for k in keys if k.lower() in
+                           ("count", "total", "score", "num", "amount", "freq", "n")]
+        value_key = (numeric_keys or aggregate_keys or [None])[0]
+        if value_key:
+            label_key = next((k for k in keys if k != value_key), value_key)
+            plan = {
+                "chart_type": "bar",
+                "label_column": label_key,
+                "value_column": value_key,
+                "description": f"Shows {value_key} broken down by {label_key}.",
+            }
+        else:
+            # No numeric column at all — the common case, one row per item.
+            # Fall back to counting rows per category on whichever column
+            # actually groups meaningfully, instead of giving up entirely.
+            count_key = _best_count_column(data, keys)
+            if not count_key:
+                return None  # nothing numeric AND nothing groupable — truly not chartable
+            plan = {
+                "chart_type": "bar",
+                "label_column": count_key,
+                "value_column": "COUNT",
+                "description": f"Shows how many results share each {count_key}.",
+            }
 
-        value_key = aggregate_keys[0]
-        label_key = next(
-            (k for k in label_keys if k != value_key),
-            label_keys[0] if label_keys else value_key
+    label_key   = plan["label_column"]
+    value_key   = plan["value_column"]
+    chart_type  = plan.get("chart_type", "bar")
+    description = plan.get("description") or f"Shows {value_key} by {label_key}."
+
+    if value_key == "COUNT":
+        counts = Counter(
+            _clean_label(row.get(label_key), f"Item {i+1}") for i, row in enumerate(data)
         )
-        labels, values, hover = [], [], []
+        # Cap to the top buckets so the chart stays readable if there are many
+        top = counts.most_common(15)
+        labels = [k for k, _ in top]
+        values = [float(v) for _, v in top]
+        title = f"Count by {label_key}"
+    else:
+        labels, values = [], []
         for i, row in enumerate(data):
             try:
-                val = float(row.get(value_key, 0))
+                val = float(row.get(value_key))
             except Exception:
                 continue
-            lbl = str(row.get(label_key, f"Item {i+1}"))
-            if lbl.startswith("http"):
-                lbl = lbl.rstrip("/").split("/")[-1].replace("_", " ")
-            parts = []
-            for k, v in row.items():
-                v_str = str(v)
-                if not v_str.startswith("http"):
-                    parts.append(f"{k}: {v_str[:60]}")
-                else:
-                    parts.append(f"{k}: .../{v_str.rstrip('/').split('/')[-1]}")
-            labels.append(lbl[:50])
+            labels.append(_clean_label(row.get(label_key), f"Item {i+1}"))
             values.append(val)
-            hover.append(" | ".join(parts))
-
-        if len(labels) < 2:
-            return None
-
-        return {
-            "is_visual": True, "type": "bar", "indexAxis": "y",
-            "labels": labels, "values": values, "hover": hover,
-            "title": f"{label_key} · {value_key}",
-        }
-
-    # ── Numeric column present ──────────────────────────────────────────────
-    value_key = numeric_keys[0]
-    preferred_labels = ["title", "name", "label", "authorname", "type",
-                        "subject", "publisher", "series"]
-    label_key = next(
-        (k for p in preferred_labels for k in label_keys if p in k.lower()),
-        label_keys[0] if label_keys else value_key
-    )
-
-    labels, values, hover = [], [], []
-    for i, row in enumerate(data):
-        try:
-            val = float(row.get(value_key))
-        except Exception:
-            continue
-        lbl = str(row.get(label_key, f"Item {i+1}"))
-        if lbl.startswith("http"):
-            lbl = lbl.rstrip("/").split("/")[-1].replace("_", " ")
-        parts = []
-        for k, v in row.items():
-            v_str = str(v)
-            if not v_str.startswith("http"):
-                parts.append(f"{k}: {v_str[:60]}")
-            else:
-                parts.append(f"{k}: .../{v_str.rstrip('/').split('/')[-1]}")
-        labels.append(lbl[:50])
-        values.append(val)
-        hover.append(" | ".join(parts))
+        title = f"{label_key} · {value_key}"
 
     if len(labels) < 2:
         return None
+    try:
+        image = _render_matplotlib_chart(labels, values, chart_type, title)
+    except Exception as e:
+        print(f"[MATPLOTLIB RENDER ERROR] {e}")
+        return None
 
-    q = user_query.lower()
-    chart_type = "pie" if "pie" in q else "bar"
-    index_axis = "y"   if "horizontal" in q else ("x" if chart_type == "bar" else "x")
     return {
-        "is_visual": True, "type": chart_type, "indexAxis": index_axis,
-        "labels": labels, "values": values, "hover": hover,
-        "title": f"{label_key} · {value_key}",
+        "is_visual":   True,
+        "type":        chart_type,
+        "title":       title,
+        "description": description,   # short caption, per requirement 4
+        "image":       image,         # data:image/png;base64,... — render with <img>
+        "labels":      labels,
+        "values":      values,
     }
 
 
@@ -271,56 +575,53 @@ class ResearchState(TypedDict):
     raw_results:  list | str | None
     # Filled by visualize_node
     viz:          dict | None
-    # Routing flag set by the router
-    needs_data:   bool
-
-# ── Intent detection  ───────────────────────
-_DATA_KW = re.compile(
-    r'\b(list|show|find|get|fetch|give|display|how many|count|what|which|who|'
-    r'books?|movies?|films?|articles?|authors?|subjects?|topics?|titles?|dates?|'
-    r'years?|types?|items?|resources?|collections?|chart|graph|visual|bar|pie|'
-    r'radio|shows?|audio|sound|photo|image|photos?|images?|series|publication|'
-    r'hungarian|sztaki|database|sparql|linked|creator|publisher|language|format)\b',
-    re.IGNORECASE
-)
-
-def classify_node(state: ResearchState) -> ResearchState:
-    """ A node that sets a routing flag in state."""
-    last_human = next(
-        (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
-        ""
-    )
-    return {"needs_data": bool(_DATA_KW.search(last_human)), "sparql_query": None,
-            "raw_results": None, "viz": None}
-
-# ── Router ─────────────────────────────────────────
-def route_after_classify(state: ResearchState) -> Literal["kg_query", "casual_chat"]:
-    """Conditional edge function — returns the name of the next node."""
-    return "kg_query" if state["needs_data"] else "casual_chat"
-
-# ── Node: casual chat ────────────────────────────────────────────────
-def casual_chat_node(state: ResearchState) -> ResearchState:
-    """Simple LLM reply for greetings and off-topic messages."""
-    messages = [
-        SystemMessage(content=(
-            "You are a helpful assistant for the SZTAKI LOD Hungarian cultural heritage "
-            "knowledge graph. For casual greetings reply briefly. If the user seems to "
-            "want data, invite them to ask a specific question about books, movies, articles, "
-            "or authors."
-        ))
-    ] + state["messages"]
-    response = llm.invoke(messages)
-    return {"messages": [response]}
 
 # ── Node: knowledge-graph query ──────────
+# No more intent classification / casual-chat branch — every message goes
+# straight through the knowledge-graph pipeline. There is nothing for this
+# app to say that isn't grounded in a real (attempted) query against the
+# schema, so a chit-chat shortcut that could assert unverified "facts" is
+# no longer on the table.
 def kg_query_node(state: ResearchState) -> ResearchState:
-    """Generate SPARQL → execute → store raw results."""
+    """Check the question is grounded in the schema → resolve entities → generate SPARQL → execute (with one bounded retry on empty) → store raw results."""
     last_human = next(
         (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
         ""
     )
-    sparql  = generate_sparql(last_human)
+
+    # Step 2 of the pipeline: recognize whether the data even exists in this
+    # graph BEFORE spending an LLM call writing SPARQL for it.
+    availability = check_data_availability(last_human)
+    if not availability["available"]:
+        reason = availability["reason"] or "The schema has no matching class or property for that."
+        return {"sparql_query": None, "raw_results": f"NOT_IN_SCHEMA: {reason}"}
+
+    # Entity resolution — ground any named entity in the question against
+    # what's actually stored in the graph before generation, rather than
+    # trusting the generator to guess the right language/spelling.
+    entity_context = resolve_entities(last_human)
+
+    sparql  = generate_sparql(last_human, entity_context)
     results = execute_sparql(sparql)
+
+    # Bounded retry (one extra attempt only): an empty result on the first
+    # try is often just a too-narrow query (wrong property, wrong wording),
+    # not genuine absence of data. Ask once for a broader approach before
+    # reporting nothing found.
+    if results == "DATABASE_EMPTY":
+        retry_sparql = generate_sparql(
+            last_human, entity_context,
+            retry_hint=("Your previous query returned zero results. Try a genuinely "
+                        "different approach this time: search a different property, "
+                        "drop an overly-specific filter, or broaden the keyword match. "
+                        f"Previous query was: {sparql}")
+        )
+        retry_results = execute_sparql(retry_sparql)
+        if isinstance(retry_results, list):
+            return {"sparql_query": retry_sparql, "raw_results": retry_results}
+        # retry also came back empty/failed — keep the original attempt, it's
+        # no worse and avoids masking a genuinely-empty result with a second error
+
     return {"sparql_query": sparql, "raw_results": results}
 
 # ── Node: visualize ───────────────────────
@@ -344,11 +645,16 @@ def summarize_node(state: ResearchState) -> ResearchState:
     results = state.get("raw_results")
 
     if isinstance(results, str):
-        context = (
-            "The database returned no results for this query."
-            if "DATABASE_EMPTY" in results
-            else f"The query failed: {results}"
-        )
+        if "DATABASE_EMPTY" in results:
+            context = "The database returned no results for this query."
+        elif results.startswith("NOT_IN_SCHEMA:"):
+            # Covers both genuinely out-of-scope questions AND greetings/chit-chat,
+            # since there's no separate casual-chat path anymore. The prompt below
+            # asks the model to word this invitingly rather than like an error.
+            context = ("This question doesn't map to anything in this knowledge "
+                       f"graph's schema. {results.split(':', 1)[1].strip()}")
+        else:
+            context = f"The query failed: {results}"
     else:
         clean = [
             {k: (v.split("/")[-1].replace("_", " ") if str(v).startswith("http") else v)
@@ -357,12 +663,33 @@ def summarize_node(state: ResearchState) -> ResearchState:
         ]
         context = json.dumps(clean, ensure_ascii=False, indent=2)
 
+    viz = state.get("viz")
+    chart_instruction = (
+        "A chart has already been generated from this data and will be shown "
+        "directly below your answer as an actual image. Do NOT describe, draw, "
+        "or narrate the chart yourself — no ASCII/markdown tables standing in "
+        "for it, no 'here is a bar chart showing...', and no disclaimers about "
+        "it not being displayed. Just summarize the findings in prose; the "
+        "image speaks for itself."
+        if viz else
+        "No chart was generated for this answer. Do NOT claim you made one, "
+        "describe what a chart 'would' look like, or apologize for a missing "
+        "chart — just answer with the facts in plain prose."
+    )
+
     prompt = f"""You are a helpful assistant for the SZTAKI LOD Hungarian cultural heritage database.
+This assistant ONLY answers questions using this knowledge graph — it does not do
+general chit-chat. If the message was a greeting or off-topic, say briefly and
+warmly that you're here to help explore this knowledge graph specifically, and
+give one or two examples of things you can look up (e.g. works by an author,
+radio shows from a given year, works by content type).
 
 User question: {last_human}
 
 Query results from the knowledge graph:
 {context}
+
+{chart_instruction}
 
 Write a clear, concise answer in plain English.
 - Summarise what was found (titles, dates, counts, etc.)
@@ -379,29 +706,15 @@ def build_graph(checkpointer):
     g = StateGraph(ResearchState)
 
     # Add nodes
-    g.add_node("classify",    classify_node)
-    g.add_node("casual_chat", casual_chat_node)
     g.add_node("kg_query",    kg_query_node)
     g.add_node("visualize",   visualize_node)
     g.add_node("summarize",   summarize_node)
 
-    # Edges
-    g.add_edge(START, "classify")
-
-    # Conditional edge — routes to kg_query OR casual_chat
-    g.add_conditional_edges(
-        "classify",
-        route_after_classify,
-        {"kg_query": "kg_query", "casual_chat": "casual_chat"}
-    )
-
-    # Data path: query → visualize → summarize → END
+    # Linear pipeline — every message: query → visualize → summarize → END
+    g.add_edge(START,         "kg_query")
     g.add_edge("kg_query",    "visualize")
     g.add_edge("visualize",   "summarize")
     g.add_edge("summarize",   END)
-
-    # Casual path: direct to END
-    g.add_edge("casual_chat", END)
 
     return g.compile(checkpointer=checkpointer)
 
@@ -445,11 +758,9 @@ def chat_stream():
                 for node_name, update in chunk.items():
                     # Send status SSE for each node that fires
                     label = {
-                        "classify":    "Classifying intent…",
                         "kg_query":    "Querying knowledge graph…",
                         "visualize":   "Analysing results…",
                         "summarize":   "Writing summary…",
-                        "casual_chat": "Thinking…",
                     }.get(node_name, f"Running {node_name}…")
 
                     yield sse("status", {"text": label})
@@ -530,53 +841,30 @@ def graph():
 
 @app.route("/graph/data")
 def graph_data():
-    """Fetch real nodes and edges from the SPARQL endpoint for the graph view."""
-
-    # Query 1: sample works with properties
-    works_sparql = SPARQL_PREFIXES + """
-SELECT DISTINCT ?item ?title ?publisher ?date ?format WHERE {
-  ?item rdf:type dbo:Work ;
-        dcterms:title ?title .
-  OPTIONAL { ?item dcterms:publisher ?publisher . }
-  OPTIONAL { ?item dcterms:date ?date . }
-  OPTIONAL { ?item dcterms:format ?format .
-             FILTER(CONTAINS(?format, "/")) }
-} LIMIT 40
-"""
-
-    # Query 2: creator links
-    creators_sparql = SPARQL_PREFIXES + """
-SELECT DISTINCT ?item ?author ?authorName WHERE {
-  ?item rdf:type dbo:Work ;
-        dcterms:creator ?author .
-  ?author foaf:name ?authorName .
-} LIMIT 40
-"""
-
-    # Query 3: subject links
-    subjects_sparql = SPARQL_PREFIXES + """
-SELECT DISTINCT ?item ?subject WHERE {
-  ?item rdf:type dbo:Work ;
-        dcterms:subject ?subject .
-} LIMIT 60
-"""
-
-    # Query 4: series links
-    series_sparql = SPARQL_PREFIXES + """
-SELECT DISTINCT ?item ?series WHERE {
-  ?item rdf:type dbo:Work ;
-        dcterms:isPartOf ?series .
-} LIMIT 40
-"""
-
-    # Query 5: content type links
-    types_sparql = SPARQL_PREFIXES + """
-SELECT DISTINCT ?item ?type WHERE {
-  ?item rdf:type dbo:Work ;
-        dcterms:type ?type .
-  FILTER(STRSTARTS(STR(?type), "http://purl.org/dc/dcmitype/"))
-} LIMIT 40
-"""
+    """Fetch ALL nodes and edges from the SZTAKI graph."""
+    query = SPARQL_PREFIXES + f"""
+    SELECT DISTINCT ?s ?p ?o
+    WHERE {{
+      GRAPH <{NDA_GRAPH}> {{
+        # Fetch all triples where the subject is a work or person
+        {{
+          ?s a dbo:Work .
+          ?s ?p ?o .
+        }} UNION {{
+          ?s a foaf:Person .
+          ?s ?p ?o .
+        }} UNION {{
+          # Fetch all triples where the object is a work or person
+          ?s ?p ?work .
+          ?work a dbo:Work .
+        }} UNION {{
+          ?s ?p ?person .
+          ?person a foaf:Person .
+        }}
+      }}
+    }}
+    LIMIT 10000
+    """
 
     def sparql_query(q):
         try:
@@ -589,86 +877,99 @@ SELECT DISTINCT ?item ?type WHERE {
             )
             if r.status_code == 200:
                 return r.json().get("results", {}).get("bindings", [])
-        except Exception:
+        except Exception as e:
+            print(f"SPARQL query failed: {e}")  # Debugging
             pass
         return []
 
+    bindings = sparql_query(query)
+    print(f"Fetched {len(bindings)} triples from SPARQL endpoint.")  # Debugging
+
+    TYPE_MAPPINGS = {
+        "http://dbpedia.org/ontology/Work": "work",
+        "http://schema.org/CreativeWork": "work",
+        "http://schema.org/Thing": "work",
+        "http://xmlns.com/foaf/0.1/Person": "person",
+        "http://dbpedia.org/ontology/Person": "person",
+        "http://schema.org/Person": "person",
+        "http://purl.org/dc/dcmitype/Sound": "sound",
+        "http://purl.org/dc/dcmitype/Text": "other",
+        "http://purl.org/dc/dcmitype/Image": "other",
+        "http://purl.org/dc/dcmitype/MovingImage": "other",
+        "http://www.w3.org/2004/02/skos/core#Concept": "concept",
+    }
+
+    EDGE_LABELS = {
+        "creator": "created by",
+        "type": "has type",
+        "isPartOf": "part of",
+        "subject": "about",
+        "sameAs": "same as",
+    }
+
     nodes = {}
     edges = []
+    subject_nodes = {}  # Track subject literals as nodes
 
-    def add_node(nid, ntype, label, props=None):
+    def add_node(nid, ntype="other", label=None, props=None):
         if nid not in nodes:
-            nodes[nid] = {"id": nid, "type": ntype, "label": label, "props": props or {}}
+            nodes[nid] = {
+                "id": nid,
+                "type": ntype,
+                "label": label or nid.split("/")[-1],
+                "props": props or {}
+            }
 
-    # Works
-    for row in sparql_query(works_sparql):
-        nid   = row["item"]["value"]
-        title = row.get("title", {}).get("value", nid.split("/")[-1])
-        props = {}
-        if "publisher" in row: props["publisher"] = row["publisher"]["value"]
-        if "date"      in row: props["date"]      = row["date"]["value"][:10]
-        if "format"    in row: props["format"]    = row["format"]["value"]
-        add_node(nid, "work", title, props)
+    def add_edge(s, p, t):
+        rel = p.split("/")[-1]
+        edges.append({
+            "s": s,
+            "rel": EDGE_LABELS.get(rel, rel),
+            "t": t
+        })
 
-    # Persons + creator edges
-    for row in sparql_query(creators_sparql):
-        wid  = row["item"]["value"]
-        pid  = row["author"]["value"]
-        name = row.get("authorName", {}).get("value", pid.split("/")[-1])
-        add_node(pid, "person", name, {"role": "Creator"})
-        if wid in nodes:
-            edges.append({"s": wid, "rel": "dcterms:creator", "t": pid})
+    for row in bindings:
+        s = row["s"]["value"]
+        p = row["p"]["value"]
+        o = row["o"]["value"]
 
-    # Subjects (concepts) + subject edges
-    subject_map = {}
-    for row in sparql_query(subjects_sparql):
-        wid     = row["item"]["value"]
-        subject = row.get("subject", {}).get("value", "")
-        if not subject:
-            continue
-        # deduplicate subjects by value
-        sid = "concept_" + str(abs(hash(subject)) % 100000)
-        if sid not in subject_map:
-            subject_map[sid] = subject
-            add_node(sid, "concept", subject[:40], {"scheme": "NDA Hungary"})
-        if wid in nodes:
-            edges.append({"s": wid, "rel": "dcterms:subject", "t": sid})
+        # Add subject node (always)
+        add_node(s)
 
-    # Series + isPartOf edges
-    series_map = {}
-    for row in sparql_query(series_sparql):
-        wid    = row["item"]["value"]
-        ser_id = row.get("series", {}).get("value", "")
-        if not ser_id:
-            continue
-        short = ser_id.rstrip("/").split("/")[-1].replace("_", " ")
-        if ser_id not in series_map:
-            series_map[ser_id] = short
-            add_node(ser_id, "series", short[:40], {"uri": ser_id})
-        if wid in nodes:
-            edges.append({"s": wid, "rel": "dcterms:isPartOf", "t": ser_id})
+        # Handle literals (e.g., titles, names, dates)
+        if o.startswith('"'):
+            prop_name = p.split("/")[-1]
+            if "props" not in nodes[s]:
+                nodes[s]["props"] = {}
+            nodes[s]["props"][prop_name] = o.strip('"')
+            # Use title/name/label as the node label
+            if prop_name in ["title", "name", "label", "alternative"]:
+                nodes[s]["label"] = o.strip('"')
+            # Special case: dcterms:subject (treat as a concept node)
+            if p == "http://purl.org/dc/terms/subject":
+                subject_value = o.strip('"')
+                if subject_value:
+                    subject_id = f"concept_{abs(hash(subject_value)) % 100000}"
+                    add_node(subject_id, "concept", subject_value, {"scheme": "NDA Hungary"})
+                    add_edge(s, p, subject_id)
+        else:
+            # Add object node (if it's a URI)
+            add_node(o)
+            # Add edge
+            add_edge(s, p, o)
+            # Handle rdf:type
+            if p == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type":
+                nodes[s]["type"] = TYPE_MAPPINGS.get(o, "other")
+            # Handle dcterms:isPartOf (series)
+            if p == "http://purl.org/dc/terms/isPartOf":
+                nodes[o]["type"] = "series"
+                nodes[o]["label"] = o.rstrip("/").split("/")[-1].replace("_", " ")
 
-    # Content types + type edges
-    type_labels = {
-        "Sound": "dcmitype:Sound", "Text": "dcmitype:Text",
-        "Image": "dcmitype:Image", "MovingImage": "dcmitype:MovingImage",
-    }
-    for row in sparql_query(types_sparql):
-        wid      = row["item"]["value"]
-        type_uri = row.get("type", {}).get("value", "")
-        if not type_uri:
-            continue
-        short = type_uri.rstrip("/").split("/")[-1]
-        label = type_labels.get(short, short)
-        add_node(type_uri, "sound" if short == "Sound" else "other", label, {"uri": type_uri})
-        if wid in nodes:
-            edges.append({"s": wid, "rel": "dcterms:type", "t": type_uri})
-
+    print(f"Built {len(nodes)} nodes and {len(edges)} edges.")  # Debugging
     return jsonify({
         "nodes": list(nodes.values()),
         "edges": edges,
     })
-
 
 
 @app.route("/sparql")

@@ -8,7 +8,6 @@
     <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 </head>
 <body>
@@ -321,12 +320,6 @@
 // ── Config ─────────────────────────────────────────────────────────────────
 marked.setOptions({ breaks: true, gfm: true });
 
-const PALETTE = [
-    '#f0c040','#4d9fff','#3dd68c','#f04f5a','#b97dff',
-    '#f4845f','#4cc9f0','#a8d8a8','#f7b731','#748ffc',
-    '#ff9f43','#00cec9','#fd79a8','#6c5ce7','#55efc4'
-];
-
 let busy = false;
 let panelOpen = true;
 
@@ -573,10 +566,13 @@ function copyQuery(editorId, btn) {
 }
 
 // ── Chart injection ───────────────────────────────────────────────────────
-// ── Chart injection ───────────────────────────────────────────────────────
+// The backend renders charts server-side with Matplotlib and sends back a
+// base64 PNG data URI in cfg.image — we just drop it into an <img>, no
+// client-side charting library involved.
 function injectChart(bubbleId, cfg) {
-    const bubble   = document.getElementById(bubbleId);
-    const canvasId = `canvas-${bubbleId}`;
+    const bubble = document.getElementById(bubbleId);
+
+    if (!cfg || !cfg.image) return; // nothing pre-rendered to show
 
     const container = document.createElement('div');
     container.className = 'chart-container';
@@ -585,85 +581,15 @@ function injectChart(bubbleId, cfg) {
             <div class="chart-title">${cfg.title || 'Data Distribution'}</div>
             <div class="chart-type-badge">${cfg.type || 'bar'}</div>
         </div>
-        <canvas id="${canvasId}"></canvas>`;
+        <img class="chart-image"
+             src="${cfg.image}"
+             alt="${escapeHtml(cfg.title || 'Chart')}"
+             style="width:100%;height:auto;border-radius:8px;display:block;">
+        ${cfg.description
+            ? `<div class="chart-caption" style="margin-top:8px;font-size:12px;color:#6b7fa0;font-family:'Inter',sans-serif;">${escapeHtml(cfg.description)}</div>`
+            : ''}`;
+
     bubble.appendChild(container);
-
-    const colors = cfg.labels.map((_, i) => PALETTE[i % PALETTE.length]);
-
-    new Chart(document.getElementById(canvasId).getContext('2d'), {
-        type: cfg.type || 'bar',
-        data: {
-            labels: cfg.labels,
-            datasets: [{
-                label: cfg.title || 'Count',
-                data: cfg.values,
-                backgroundColor: colors.map(c => c + '28'),
-                borderColor: colors,
-                borderWidth: 2,
-                borderRadius: 5,
-                borderSkipped: false
-            }]
-        },
-        options: {
-            indexAxis: cfg.indexAxis || 'x',
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    display: cfg.type === 'pie' || cfg.type === 'doughnut',
-                    labels: { color: '#6b7fa0', font: { family: 'JetBrains Mono', size: 10 } }
-                },
-                tooltip: {
-                    backgroundColor: '#111620',
-                    borderColor: '#2a3650',
-                    borderWidth: 1,
-                    titleColor: '#f0c040',
-                    bodyColor: '#c8d6eb',
-                    titleFont: { family: 'JetBrains Mono', size: 11 },
-                    bodyFont:  { family: 'Inter', size: 12 },
-                    padding: 10,
-                    cornerRadius: 6,
-                    callbacks: {
-                        // Title = the bar's own label (unique per bar)
-                        title: (items) => {
-                            return cfg.labels[items[0].dataIndex] || '';
-                        },
-                        // Body = hover detail if available, else just the value
-                        label: (item) => {
-                            const hover = cfg.hover && cfg.hover[item.dataIndex];
-                            if (hover) {
-                                // Split on ' | ' so each field is on its own line
-                                return hover.split(' | ');
-                            }
-                            return ` ${item.formattedValue}`;
-                        }
-                    }
-                }
-            },
-            scales: (cfg.type === 'pie' || cfg.type === 'doughnut') ? {} : {
-                x: {
-                    ticks: { color: '#3d4f6b', font: { family: 'JetBrains Mono', size: 9 },
-                             // Truncate long axis labels so they don't overlap
-                             callback: function(val, idx) {
-                                 const lbl = this.getLabelForValue(idx);
-                                 return lbl && lbl.length > 22 ? lbl.slice(0, 22) + '…' : lbl;
-                             }
-                           },
-                    grid: { color: '#1e2736' }
-                },
-                y: {
-                    beginAtZero: true,
-                    ticks: { color: '#3d4f6b', font: { family: 'JetBrains Mono', size: 9 },
-                             callback: function(val, idx) {
-                                 const lbl = this.getLabelForValue(idx);
-                                 return lbl && lbl.length > 22 ? lbl.slice(0, 22) + '…' : lbl;
-                             }
-                           },
-                    grid: { color: '#1e2736' }
-                }
-            }
-        }
-    });
 }
 
 // ── Bubble factory ────────────────────────────────────────────────────────

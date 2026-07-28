@@ -34,7 +34,7 @@ let dragging = null, dragOffX = 0, dragOffY = 0;
 let isPanning = false, panStartX = 0, panStartY = 0, panBaseX = 0, panBaseY = 0;
 let hoveredNode  = null;
 let selectedNode = null;
-let activeFilters = new Set(['work','person','sound','concept']);
+let activeFilters = new Set(['work', 'person', 'sound', 'concept', 'series', 'other']);
 let searchTerm = '';
 let animFrame;
 let simRunning = true;

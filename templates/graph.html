@@ -1,68 +1,78 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SZTAKI LOD · Knowledge Graph</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/graph.css') }}">
-</head>
-<body>
+{% extends "base.html" %}
 
-<!-- ═══ NAV ═══ -->
-<nav id="navbar">
-    <a class="nav-logo" href="/">
-        <div class="nav-logo-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M12 2v4M12 18v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M2 12h4M18 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
-            </svg>
-        </div>
-        <div class="nav-logo-text">
-            SZTAKI LOD
-            <span>Hungarian Cultural Heritage · v1</span>
-        </div>
-    </a>
+{% block title %}SZTAKI LOD · Knowledge Graph{% endblock %}
+{% block graph_active %}active{% endblock %}
 
-    <div class="nav-tabs">
-        <a class="nav-tab" href="/">
-            <div class="nav-tab-dot" style="background:var(--accent)"></div>
-            Chat
-        </a>
-        <a class="nav-tab active" href="/graph">
-            <div class="nav-tab-dot" style="background:var(--blue)"></div>
-            Knowledge Graph
-        </a>
-    </div>
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/graph.css') }}">
+<style>
+    /* Override base.html dark theme with white background */
+    :root {
+        --bg: #ffffff;
+        --bg2: #f8f9fa;
+        --surface: #ffffff;
+        --surface2: #f8f9fa;
+        --border: #e0e0e0;
+        --border-hi: #cccccc;
+        --text: #1a1a1a;
+        --text-dim: #6c757d;
+        --text-muted: #9ca3af;
+    }
 
-    <div style="flex:1"></div>
+    /* Force white background for the page and graph */
+    body {
+        background-color: var(--bg) !important;
+    }
 
-    <div class="nav-status">
-        <div class="status-dot"></div>
-        lod.sztaki.hu · Virtuoso
-    </div>
+    #app-body {
+        background-color: var(--bg) !important;
+    }
 
-    <div class="nav-actions">
-        <button class="nav-btn" onclick="resetLayout()">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>
-            </svg>
-            Reset View
-        </button>
-        <button class="nav-btn" id="btn-expand" onclick="toggleExpand()">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
-                <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
-            </svg>
-            Expand All
-        </button>
-    </div>
-</nav>
+    #canvas-wrap {
+        background-color: var(--bg) !important;
+    }
 
-<!-- ═══ BODY ═══ -->
+    #graph-canvas {
+        background-color: white !important;
+    }
+
+    /* Remove noise overlay from base.html */
+    body::before {
+        display: none !important;
+    }
+
+    /* Adjust grid opacity for white background */
+    #canvas-wrap::before {
+        opacity: 0.05 !important;
+    }
+
+    /* Ensure loading overlay is visible on white background */
+    #graph-loading {
+        background: rgba(255, 255, 255, 0.9) !important;
+    }
+</style>
+{% endblock %}
+
+{% block nav_actions %}
+<div class="nav-actions">
+    <button class="nav-btn" onclick="resetLayout()">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>
+        </svg>
+        Reset View
+    </button>
+    <button class="nav-btn" id="btn-expand" onclick="toggleExpand()">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+        </svg>
+        Expand All
+    </button>
+</div>
+{% endblock %}
+
+{% block content %}
 <div id="app-body">
-
     <!-- LEFT: node list -->
     <aside id="left-panel">
         <div class="panel-header">
@@ -91,7 +101,6 @@
 
     <!-- CENTRE: canvas -->
     <div id="canvas-wrap">
-
         <canvas id="graph-canvas"></canvas>
 
         <!-- loading -->
@@ -141,14 +150,12 @@
             </div>
         </div>
     </aside>
-
 </div>
+{% endblock %}
 
-<!-- inject live data from Flask before graph.js runs -->
+{% block scripts %}
 <script>
     window.GRAPH_DATA = null;  // will be populated by fetch in graph.js
 </script>
 <script src="{{ url_for('static', filename='js/graph.js') }}"></script>
-
-</body>
-</html>
+{% endblock %}
