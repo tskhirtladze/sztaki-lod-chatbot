@@ -1,0 +1,566 @@
+{% extends "base.html" %}
+
+{% block title %}SZTAKI LOD · About{% endblock %}
+{% block about_active %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+    #about-page {
+        flex: 1;
+        overflow-y: auto;
+        background: var(--bg2);
+    }
+
+    .about-inner {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 56px 32px 90px;
+    }
+
+    /* ── Hero ── */
+    .about-hero {
+        margin-bottom: 56px;
+    }
+    .about-kicker {
+        font-family: sylfaen;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: .16em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 12px;
+    }
+    .about-hero h1 {
+        font-family: sylfaen;
+        font-size: 34px;
+        font-weight: 800;
+        color: var(--text);
+        line-height: 1.15;
+        margin-bottom: 14px;
+    }
+    .about-hero p {
+        font-size: 15px;
+        color: var(--text-dim);
+        line-height: 1.7;
+        max-width: 640px;
+    }
+
+    /* ── Section shell ── */
+    .about-section {
+        margin-bottom: 48px;
+    }
+    .about-section-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 22px;
+    }
+    .about-section-num {
+        font-family: sylfaen;
+        font-size: 12px;
+        color: var(--text-muted);
+    }
+    .about-section h2 {
+        font-family: var(--font-display);
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--text);
+    }
+    .about-section-sub {
+        font-size: 13.5px;
+        color: var(--text-dim);
+        line-height: 1.65;
+        margin: -10px 0 22px;
+        max-width: 680px;
+    }
+
+    /* ── Pipeline steps ── */
+    .pipeline {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+    }
+    .pipeline-step {
+        display: flex;
+        gap: 18px;
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--border);
+        position: relative;
+    }
+    .pipeline-step:last-child { border-bottom: none; }
+    .pipeline-step-badge {
+        flex-shrink: 0;
+        width: 34px; height: 34px;
+        border-radius: 9px;
+        background: var(--accent-dim);
+        border: 1px solid rgba(37,99,235,.18);
+        color: var(--accent);
+        display: flex; align-items: center; justify-content: center;
+        font-family: sylfaen;
+        font-size: 13px;
+        font-weight: 700;
+    }
+    .pipeline-step-body { flex: 1; min-width: 0; }
+    .pipeline-step-title {
+        font-family: var(--font-display);
+        font-size: 14.5px;
+        font-weight: 700;
+        color: var(--text);
+        margin-bottom: 5px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .pipeline-step-desc {
+        font-size: 12.8px;
+        color: var(--text-dim);
+        line-height: 1.65;
+    }
+    .step-tag {
+        font-family: sylfaen;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+        padding: 2px 7px;
+        border-radius: 4px;
+        background: var(--surface2);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+    }
+    .step-tag.llm  { color: var(--accent); border-color: rgba(37,99,235,.25); background: var(--accent-dim); }
+    .step-tag.net  { color: var(--purple); border-color: rgba(124,58,237,.22); background: rgba(124,58,237,.07); }
+    .step-tag.safe { color: var(--green);  border-color: rgba(22,163,74,.22);  background: rgba(22,163,74,.07); }
+
+    /* connecting line between steps */
+    .pipeline-step:not(:last-child)::after {
+        content: '';
+        position: absolute;
+        left: 41px; bottom: -1px;
+        width: 1px; height: 1px;
+    }
+
+    /* ── Stat cards ── */
+    .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+    .stat-card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 18px;
+    }
+    .stat-value {
+        font-family: sylfaen;
+        font-size: 22px;
+        font-weight: 800;
+        color: var(--text);
+        margin-bottom: 4px;
+    }
+    .stat-label {
+        font-family: sylfaen;
+        font-size: 10px;
+        letter-spacing: .05em;
+        color: var(--text-muted);
+        text-transform: uppercase;
+    }
+
+    /* ── Data shape diagram ── */
+    .shape-card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 22px 26px;
+        margin-bottom: 20px;
+    }
+    .shape-diagram {
+        font-family: sylfaen;
+        font-size: 12px;
+        line-height: 2.05;
+        color: var(--text-dim);
+        white-space: pre;
+        overflow-x: auto;
+    }
+    .shape-diagram .node   { color: var(--accent); font-weight: 600; }
+    .shape-diagram .rel    { color: var(--text-muted); }
+    .shape-diagram .lit    { color: var(--green); }
+
+    /* ── Property table ── */
+    .prop-table-wrap {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+    }
+    table.prop-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+    }
+    table.prop-table th {
+        text-align: left;
+        font-family: sylfaen;
+        font-size: 10px;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        background: var(--surface2);
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+    }
+    table.prop-table td {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text-dim);
+        vertical-align: top;
+    }
+    table.prop-table tr:last-child td { border-bottom: none; }
+    table.prop-table td.mono {
+        font-family: sylfaen;
+        font-size: 11.5px;
+        color: var(--accent);
+        white-space: nowrap;
+    }
+    table.prop-table td.count {
+        font-family: sylfaen;
+        font-size: 11px;
+        color: var(--text-muted);
+        white-space: nowrap;
+        text-align: right;
+    }
+
+    /* ── Guardrail list ── */
+    .guardrail-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+    }
+    .guardrail-card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 18px;
+        display: flex;
+        gap: 12px;
+    }
+    .guardrail-icon {
+        flex-shrink: 0;
+        width: 26px; height: 26px;
+        border-radius: 7px;
+        background: var(--surface2);
+        display: flex; align-items: center; justify-content: center;
+        color: var(--green);
+        font-size: 13px;
+    }
+    .guardrail-title {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 3px;
+    }
+    .guardrail-desc {
+        font-size: 11.8px;
+        color: var(--text-dim);
+        line-height: 1.55;
+    }
+
+    /* ── Source footer card ── */
+    .source-card {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+    }
+    .source-label {
+        font-family: sylfaen;
+        font-size: 10px;
+        letter-spacing: .06em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        margin-bottom: 4px;
+    }
+    .source-value {
+        font-family: sylfaen;
+        font-size: 12.5px;
+        color: var(--accent);
+        word-break: break-all;
+    }
+    .cta-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        background: var(--accent);
+        color: #fff;
+        text-decoration: none;
+        padding: 10px 18px;
+        border-radius: 8px;
+        font-family: var(--font-display);
+        font-size: 12.5px;
+        font-weight: 700;
+        white-space: nowrap;
+        transition: opacity .2s;
+    }
+    .cta-btn:hover { opacity: .9; }
+
+    @media (max-width: 800px) {
+        .stat-grid { grid-template-columns: repeat(2, 1fr); }
+        .guardrail-grid { grid-template-columns: 1fr; }
+        .about-inner { padding: 36px 18px 60px; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="about-page">
+    <div class="about-inner">
+
+        <!-- ═══ HERO ═══ -->
+        <div class="about-hero">
+            <div class="about-kicker">How it works</div>
+            <h1>Ask a question in plain English.<br>Get an answer grounded in real data.</h1>
+            <p>
+                This app doesn't guess - every answer is produced by translating your
+                question into a real SPARQL query, running it against a live knowledge
+                graph of Hungarian cultural heritage, and summarising only what came
+                back. Here's exactly what happens between your message and the reply,
+                and what data it's actually drawing from.
+            </p>
+        </div>
+
+        <!-- ═══ PIPELINE ═══ -->
+        <div class="about-section">
+            <div class="about-section-head">
+                <span class="about-section-num">01</span>
+                <h2>The pipeline</h2>
+            </div>
+            <p class="about-section-sub">
+                Every message runs through the same five stages, in order. Nothing is
+                answered from general knowledge - if a stage can't ground the question
+                in the graph, the pipeline says so instead of improvising.
+            </p>
+
+            <div class="pipeline">
+                <div class="pipeline-step">
+                    <div class="pipeline-step-badge">1</div>
+                    <div class="pipeline-step-body">
+                        <div class="pipeline-step-title">
+                            Check the question against the schema
+                            <span class="step-tag llm">Claude</span>
+                        </div>
+                        <div class="pipeline-step-desc">
+                            Before writing a single line of SPARQL, the model checks whether the
+                            question even maps to something this graph tracks - using only the
+                            class and property names that actually exist in it. Questions about
+                            the weather, stock prices, or anything outside the schema are turned
+                            away here rather than answered with unrelated data.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pipeline-step">
+                    <div class="pipeline-step-badge">2</div>
+                    <div class="pipeline-step-body">
+                        <div class="pipeline-step-title">
+                            Resolve named entities
+                            <span class="step-tag llm">Claude</span>
+                            <span class="step-tag net">Live lookup</span>
+                        </div>
+                        <div class="pipeline-step-desc">
+                            Names in this graph are almost entirely Hungarian, so a question
+                            like "the Hungarian Central Statistical Office" won't match the
+                            stored string on its own. This step asks the model for candidate
+                            spellings and translations, checks each one against the graph for
+                            real, existing matches, and hands generation the exact stored
+                            string instead of a guess.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pipeline-step">
+                    <div class="pipeline-step-badge">3</div>
+                    <div class="pipeline-step-body">
+                        <div class="pipeline-step-title">
+                            Generate a SPARQL query
+                            <span class="step-tag llm">Claude</span>
+                            <span class="step-tag safe">Validated</span>
+                        </div>
+                        <div class="pipeline-step-desc">
+                            The model writes one SELECT query, constrained to the curated
+                            schema below - no invented properties, no write operations, always
+                            scoped to the correct named graph. If the first attempt comes back
+                            empty, one broader retry is allowed before reporting nothing found.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pipeline-step">
+                    <div class="pipeline-step-badge">4</div>
+                    <div class="pipeline-step-body">
+                        <div class="pipeline-step-title">
+                            Run it against the live endpoint
+                            <span class="step-tag net">SPARQL</span>
+                        </div>
+                        <div class="pipeline-step-desc">
+                            The query executes against SZTAKI's public Fuseki/Virtuoso
+                            endpoint in real time. Results are capped at a safe row limit so a
+                            malformed or overly broad query can't overwhelm the app.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pipeline-step">
+                    <div class="pipeline-step-badge">5</div>
+                    <div class="pipeline-step-body">
+                        <div class="pipeline-step-title">
+                            Visualize, then summarize
+                            <span class="step-tag llm">Claude</span>
+                        </div>
+                        <div class="pipeline-step-desc">
+                            If the results have a meaningful shape to plot - a breakdown by
+                            year, publisher, or content type - a chart is generated
+                            automatically. Finally, the model writes a short plain-English
+                            answer using only the rows that actually came back; it's told
+                            explicitly not to invent data or narrate a chart that wasn't made.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ DATA ═══ -->
+        <div class="about-section">
+            <div class="about-section-head">
+                <span class="about-section-num">02</span>
+                <h2>What data it uses</h2>
+            </div>
+            <p class="about-section-sub">
+                Everything comes from one named graph inside SZTAKI's public Linked
+                Open Data endpoint - a catalogue of Hungarian cultural heritage
+                works (largely digitised radio programming) and the people who created them.
+            </p>
+
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-value">{{ work_count }}</div>
+                    <div class="stat-label">Works</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{{ person_count }}</div>
+                    <div class="stat-label">People</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">2.7M+</div>
+                    <div class="stat-label">rdf:type triples</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">1</div>
+                    <div class="stat-label">Named graph in scope</div>
+                </div>
+            </div>
+
+            <div class="shape-card">
+                <div class="shape-diagram"><span class="node">Work</span> ──creator──▶ <span class="node">Person</span>
+       │                    │
+       │              <span class="rel">foaf:name, dcterms:alternative</span>
+       │              <span class="rel">dbp:birthYear, dbp:deathYear</span>
+       │
+       ├──<span class="rel">subject</span>────▶ <span class="lit">"plain-text topic"</span>
+       ├──<span class="rel">isPartOf</span>───▶ <span class="node">Series URI</span>
+       ├──<span class="rel">type</span>───────▶ <span class="lit">Sound / Text / Image / MovingImage</span>
+       └──<span class="rel">title, date, publisher, format,</span>
+          <span class="rel">description, language, identifier</span>  ──▶ <span class="lit">plain values</span></div>
+            </div>
+
+            <div class="prop-table-wrap">
+                <table class="prop-table">
+                    <thead>
+                        <tr><th>Property</th><th>What it holds</th><th>Usage</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td class="mono">dcterms:title</td><td>Title of the work</td><td class="count">820,423</td></tr>
+                        <tr><td class="mono">dcterms:creator</td><td>Link from a work to its author/publisher node</td><td class="count">1,063,875</td></tr>
+                        <tr><td class="mono">foaf:name</td><td>Author's name</td><td class="count">235,288</td></tr>
+                        <tr><td class="mono">dcterms:date</td><td>Publication date (usually a full timestamp)</td><td class="count">773,150</td></tr>
+                        <tr><td class="mono">dcterms:publisher</td><td>Publisher or station name</td><td class="count">766,068</td></tr>
+                        <tr><td class="mono">dcterms:type</td><td>Content type - Sound / Text / Image / MovingImage</td><td class="count">896,523</td></tr>
+                        <tr><td class="mono">dcterms:subject</td><td>Free-text topic or keyword</td><td class="count">375,083</td></tr>
+                        <tr><td class="mono">dcterms:language</td><td>Language of the work</td><td class="count">452,872</td></tr>
+                        <tr><td class="mono">dcterms:format</td><td>MIME type and/or duration</td><td class="count">220,267</td></tr>
+                        <tr><td class="mono">dbp:birthYear / deathYear</td><td>Birth/death year of a person</td><td class="count">41,510 / 11,700</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ═══ GUARDRAILS ═══ -->
+        <div class="about-section">
+            <div class="about-section-head">
+                <span class="about-section-num">03</span>
+                <h2>Guardrails</h2>
+            </div>
+            <p class="about-section-sub">
+                A few things this pipeline deliberately does, so answers stay
+                trustworthy rather than just fluent.
+            </p>
+            <div class="guardrail-grid">
+                <div class="guardrail-card">
+                    <div class="guardrail-icon">✓</div>
+                    <div>
+                        <div class="guardrail-title">Schema-only questions</div>
+                        <div class="guardrail-desc">If a question doesn't map to a real class or property in the graph, it's declined before any query is written.</div>
+                    </div>
+                </div>
+                <div class="guardrail-card">
+                    <div class="guardrail-icon">✓</div>
+                    <div>
+                        <div class="guardrail-title">Read-only queries</div>
+                        <div class="guardrail-desc">Only SELECT statements are allowed - INSERT, DELETE, DROP and similar are rejected outright.</div>
+                    </div>
+                </div>
+                <div class="guardrail-card">
+                    <div class="guardrail-icon">✓</div>
+                    <div>
+                        <div class="guardrail-title">Always graph-scoped</div>
+                        <div class="guardrail-desc">The endpoint hosts several unrelated datasets sharing the same property names - every query is forced inside the correct named graph so results never mix in unrelated data.</div>
+                    </div>
+                </div>
+                <div class="guardrail-card">
+                    <div class="guardrail-icon">✓</div>
+                    <div>
+                        <div class="guardrail-title">No invented facts</div>
+                        <div class="guardrail-desc">The summary is written strictly from the rows that came back from the query - it's explicitly instructed not to fill in gaps.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══ SOURCE ═══ -->
+        <div class="source-card">
+            <div>
+                <div class="source-label">Live SPARQL endpoint</div>
+                <div class="source-value">{{ endpoint }}</div>
+            </div>
+            <a class="cta-btn" href="/">
+                Try it in Chat
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                    <path d="M5 12h14M13 6l6 6-6 6"/>
+                </svg>
+            </a>
+        </div>
+
+    </div>
+</div>
+{% endblock %}

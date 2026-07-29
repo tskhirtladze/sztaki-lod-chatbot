@@ -36,9 +36,9 @@
             <div class="nav-tab-dot" style="background:var(--blue)"></div>
             Knowledge Graph
         </button>
-        <button class="nav-tab" onclick="setTab(this, 'sparql')">
+        <button class="nav-tab" onclick="setTab(this, 'about')">
             <div class="nav-tab-dot" style="background:var(--green)"></div>
-            SPARQL Explorer
+            About
         </button>
     </div>
 
@@ -46,7 +46,7 @@
 
     <div class="nav-status">
         <div class="status-dot"></div>
-        Llama 3.1 · lod.sztaki.hu
+        Claude Opus 4.8 · lod.sztaki.hu
     </div>
 
     <div class="nav-actions">
@@ -164,7 +164,7 @@
                 <div class="tool-card">
                     <div class="tool-card-icon" style="background:rgba(240,192,64,.1);color:var(--accent)">🤖</div>
                     <div class="tool-card-text">
-                        <div class="tool-card-name">Llama 3.1 Agent</div>
+                        <div class="tool-card-name">Claude Opus 4.8 Agent</div>
                         <div class="tool-card-desc">Graph RAG · LangGraph</div>
                     </div>
                     <div class="tool-status ts-amber"></div>
@@ -332,8 +332,8 @@ function setTab(el, tab) {
         window.location.href = "/graph";
     }
 
-    if (tab === "sparql") {
-        window.location.href = "/sparql";
+    if (tab === "about") {
+        window.location.href = "/about";
     }
 
     if (tab === "chat") {
