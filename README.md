@@ -3,21 +3,30 @@
 A Flask + LangGraph application that lets users chat in plain English with the
 [SZTAKI Linked Open Data](https://lod.sztaki.hu) knowledge graph of Hungarian
 cultural heritage (books, movies, articles, authors, etc.). User questions are
-classified, translated into SPARQL by a local LLM, executed against a Fuseki
-SPARQL endpoint, optionally turned into a chart, and summarized back into
-natural language - all streamed to the browser over Server-Sent Events.
+checked against the graph's schema, translated into SPARQL by Claude, executed
+against a Fuseki SPARQL endpoint, optionally turned into a chart, and
+summarized back into natural language - all streamed to the browser over
+Server-Sent Events.
 
 ## How it works
 
-1. **classify** - decides whether the message needs data from the knowledge
-   graph or is just casual conversation.
-2. **kg_query** - asks the local LLM to generate a `SELECT DISTINCT … WHERE { … }`
-   SPARQL query (SPARQL 1.0 only) and runs it against the Fuseki endpoint.
-3. **visualize** - inspects the result rows and, if there's something worth
-   plotting, builds a bar/pie chart config.
-4. **summarize** - asks the LLM to turn the raw results into a short,
-   non-technical answer.
-5. **casual_chat** - handles greetings / off-topic messages directly.
+Every message goes straight through the knowledge-graph pipeline (there's no
+separate intent classifier or casual-chat shortcut - the summarizer handles
+greetings/off-topic messages by explaining what it can look up instead):
+
+1. **kg_query** - a single node that:
+   - checks whether the question maps to concepts that actually exist in the
+     graph's schema, before spending a call generating SPARQL for it
+   - runs an entity-resolution pass so named entities (people, publishers,
+     titles) are matched against how they're actually stored in the graph,
+     rather than trusting the user's original wording/language
+   - asks Claude to generate a `SELECT DISTINCT … WHERE { … }` SPARQL query
+     (SPARQL 1.0 only) and runs it against the Fuseki endpoint
+   - retries once with a broadened query if the first attempt comes back empty
+2. **visualize** - inspects the result rows and, if there's something worth
+   plotting, builds a bar/pie/line chart with matplotlib.
+3. **summarize** - asks Claude to turn the raw results (or the reason nothing
+   was found) into a short, non-technical answer.
 
 Conversation state is persisted per browser session using a LangGraph
 `SqliteSaver` checkpointer (`memory.db`), so the assistant remembers prior
@@ -26,56 +35,13 @@ turns in a thread.
 ## Requirements
 
 - Python 3.10+
-- [Ollama](https://ollama.com) running locally, with the `llama3.1` model
-  pulled (this project uses **no cloud LLM** - everything runs on your
-  machine)
+- An [Anthropic API key](https://console.anthropic.com/) - this app calls the
+  Claude API (`claude-opus-4-8` by default) via `langchain_anthropic`, so
+  there's no local LLM to install or run
 - Network access to a SPARQL endpoint (defaults to the public
   `https://lod.sztaki.hu/sparql` endpoint)
 
-## 1. Install and run a local LLM with Ollama
-
-This app talks to a local model through `langchain_ollama.ChatOllama`, so you
-need Ollama installed and serving the `llama3.1` model before starting the
-Flask app.
-
-### Install Ollama
-
-- **macOS / Windows**: download the installer from
-  [ollama.com/download](https://ollama.com/download) and run it.
-- **Linux**:
-  ```bash
-  curl -fsSL https://ollama.com/install.sh | sh
-  ```
-
-### Pull the model
-
-```bash
-ollama pull llama3.1
-```
-
-This downloads the 8B-parameter Llama 3.1 model.
-
-### Start the Ollama server
-
-Ollama usually starts automatically as a background service after
-installation. If it isn't running, start it manually:
-
-```bash
-ollama serve
-```
-
-By default it listens on `http://localhost:11434`, which is what
-`ChatOllama` connects to out of the box. Verify it's working:
-
-```bash
-ollama run llama3.1 "say hi"
-```
-
-If you want to use a different model, change the `model="llama3.1"` argument
-in `app.py` (in the `ChatOllama(...)` initialization) to whatever you've
-pulled, e.g. `ollama pull mistral` and `model="mistral"`.
-
-## 2. Set up the Python project
+## 1. Set up the Python project
 
 Clone the repo, then create a virtual environment and install dependencies:
 
@@ -86,23 +52,35 @@ source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## 2. Configure your API key
+
+Set your Anthropic API key as an environment variable (or put it in a `.env`
+file in the project root - it's loaded automatically via `python-dotenv`):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
 ## 3. Configuration
 
-All configuration is via environment variables (optional - sensible defaults
-are built in):
+Further configuration is via environment variables (optional - sensible
+defaults are built in):
 
-| Variable           | Default                        | Description                                  |
-|---------------------|---------------------------------|-----------------------------------------------|
-| `FUSEKI_ENDPOINT`   | `https://lod.sztaki.hu/sparql` | SPARQL endpoint to query                      |
-| `FUSEKI_TIMEOUT`    | `75`                            | Request timeout in seconds                    |
-| `LLM_MAX_TOKENS`    | `1200`                         | Max tokens generated per LLM call             |
-| `FLASK_SECRET_KEY`  | random                         | Flask session secret                          |
-| `MEMORY_DB`         | `memory.db`                   | SQLite file for LangGraph checkpoints         |
+| Variable            | Default                        | Description                                    |
+|----------------------|---------------------------------|--------------------------------------------------|
+| `ANTHROPIC_API_KEY`  | *(required)*                   | API key used by `langchain_anthropic`             |
+| `FUSEKI_ENDPOINT`    | `https://lod.sztaki.hu/sparql` | SPARQL endpoint to query                          |
+| `FUSEKI_TIMEOUT`     | `75`                            | Request timeout in seconds                        |
+| `LLM_MAX_TOKENS`     | `1200`                         | Max tokens generated per LLM call                 |
+| `FLASK_SECRET_KEY`   | auto-generated & persisted     | Flask session secret                              |
+| `MEMORY_DB`          | `memory.db`                   | SQLite file for LangGraph checkpoints             |
+
+If `FLASK_SECRET_KEY` isn't set, a random key is generated once and saved to
+a local file (`.flask_secret_key` by default, override with
+`SECRET_KEY_FILE`) so it stays stable across restarts and multiple workers.
+Set `FLASK_SECRET_KEY` explicitly for real multi-host deployments.
 
 ## 4. Run the app
-
-Make sure Ollama is running (`ollama serve`) and the `llama3.1` model has
-been pulled, then:
 
 ```bash
 python app.py
@@ -117,8 +95,9 @@ Available pages/routes:
 - `/chat` – POST endpoint, non-streaming fallback
 - `/reset` – POST endpoint, starts a fresh conversation thread
 - `/graph` – graph visualization page
-- `/graph/data` – JSON endpoint with sample nodes/edges from the knowledge graph
-- `/sparql` – simple SPARQL explorer page
+- `/graph/data` – JSON endpoint with a bounded sample of nodes/edges from the
+  knowledge graph (capped at 10,000 triples - not the full graph)
+- `/about` – about page with endpoint/graph info and dataset size
 
 ## Project structure
 
@@ -129,6 +108,6 @@ Available pages/routes:
 ├── templates/
 │   ├── index.html       # chat UI
 │   ├── graph.html       # graph visualization
-│   └── sparql.html      # SPARQL explorer
-└── memory.db            # SQLite-backed conversation checkpoints (auto-created)
+│   └── about.html       # about page
+└── memory.db             # SQLite-backed conversation checkpoints (auto-created)
 ```

@@ -53,24 +53,6 @@
 </style>
 {% endblock %}
 
-{% block nav_actions %}
-<div class="nav-actions">
-    <button class="nav-btn" onclick="resetLayout()">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>
-        </svg>
-        Reset View
-    </button>
-    <button class="nav-btn" id="btn-expand" onclick="toggleExpand()">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
-            <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
-        </svg>
-        Expand All
-    </button>
-</div>
-{% endblock %}
-
 {% block content %}
 <div id="app-body">
     <!-- LEFT: node list -->
@@ -90,9 +72,9 @@
         </div>
 
         <div class="filter-row">
-            <button class="filter-chip chip-work active"    data-type="work"    onclick="toggleFilter(this)">Work</button>
-            <button class="filter-chip chip-person active"  data-type="person"  onclick="toggleFilter(this)">Person</button>
-            <button class="filter-chip chip-sound active"   data-type="sound"   onclick="toggleFilter(this)">Audio</button>
+            <button class="filter-chip chip-work active" data-type="work" onclick="toggleFilter(this)">Work</button>
+            <button class="filter-chip chip-person active" data-type="person" onclick="toggleFilter(this)">Person</button>
+            <button class="filter-chip chip-sound active" data-type="sound" onclick="toggleFilter(this)">Audio</button>
             <button class="filter-chip chip-concept active" data-type="concept" onclick="toggleFilter(this)">Concept</button>
         </div>
 
@@ -103,13 +85,11 @@
     <div id="canvas-wrap">
         <canvas id="graph-canvas"></canvas>
 
-        <!-- loading -->
         <div id="graph-loading">
             <div class="loading-spinner"></div>
             <div class="loading-label">Building knowledge graph…</div>
         </div>
 
-        <!-- legend -->
         <div id="canvas-legend">
             <div class="legend-title">Node Types</div>
             <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>dbo:Work</div>
@@ -119,24 +99,26 @@
             <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div>Series / Other</div>
         </div>
 
-        <!-- stats -->
         <div id="canvas-stats">
             <div class="stat-pill"><strong id="stat-nodes">0</strong> nodes</div>
             <div class="stat-pill"><strong id="stat-edges">0</strong> edges</div>
             <div class="stat-pill" id="stat-selected" style="display:none"><strong id="stat-sel-label">—</strong> selected</div>
         </div>
 
-        <!-- zoom controls -->
         <div id="canvas-controls">
             <button class="ctrl-btn" onclick="zoomBy(1.25)" title="Zoom in">+</button>
-            <button class="ctrl-btn" onclick="zoomBy(0.8)"  title="Zoom out">−</button>
+            <button class="ctrl-btn" onclick="zoomBy(0.8)" title="Zoom out">−</button>
             <button class="ctrl-btn" onclick="resetLayout()" title="Reset">⟳</button>
+            <button class="ctrl-btn" id="btn-fullscreen" onclick="toggleCanvasFullscreen()" title="Fullscreen">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                </svg>
+            </button>
         </div>
 
-        <!-- hover tooltip -->
         <div id="node-tooltip">
             <div class="tooltip-title" id="tt-title"></div>
-            <div class="tooltip-type"  id="tt-type"></div>
+            <div class="tooltip-type" id="tt-type"></div>
             <div id="tt-props"></div>
         </div>
     </div>
@@ -146,7 +128,11 @@
         <div id="detail-content">
             <div class="detail-empty">
                 <div class="detail-empty-icon">◎</div>
-                <div class="detail-empty-text">Click any node<br>to inspect its properties<br>and connections</div>
+                <div class="detail-empty-text">
+                    Click any node<br>
+                    to inspect its properties<br>
+                    and connections
+                </div>
             </div>
         </div>
     </aside>
@@ -155,7 +141,7 @@
 
 {% block scripts %}
 <script>
-    window.GRAPH_DATA = null;  // will be populated by fetch in graph.js
+    window.GRAPH_DATA = null;
 </script>
 <script src="{{ url_for('static', filename='js/graph.js') }}"></script>
 {% endblock %}

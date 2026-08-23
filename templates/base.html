@@ -41,13 +41,21 @@
     <div class="nav-tabs">
 
         <a href="/"
-           class="nav-tab {% block chat_active %}{% endblock %}">
+           class="nav-tab {% block chat_active %}{% endblock %}"
+           onclick="if (window.location.pathname === this.pathname) event.preventDefault();">
             Chat
         </a>
 
         <a href="/graph"
-           class="nav-tab {% block graph_active %}{% endblock %}">
+           class="nav-tab {% block graph_active %}{% endblock %}"
+           onclick="if (window.location.pathname === this.pathname) event.preventDefault();">
             Knowledge Graph
+        </a>
+
+        <a href="/about"
+           class="nav-tab {% block about_active %}{% endblock %}"
+           onclick="if (window.location.pathname === this.pathname) event.preventDefault();">
+            About
         </a>
 
     </div>

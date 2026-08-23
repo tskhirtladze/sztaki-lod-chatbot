@@ -4,12 +4,14 @@ import uuid
 import json
 import sqlite3
 import requests
+from dotenv import load_dotenv
+load_dotenv()
 from collections import Counter
 from typing import Annotated, TypedDict
 
 from flask import Flask, render_template, request, jsonify, Response, session, stream_with_context, url_for
-from langchain_ollama import ChatOllama
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 import ssl
@@ -17,6 +19,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import io
 import base64
+import hashlib
 import matplotlib
 matplotlib.use("Agg")  # headless — this runs inside a Flask server process, no display
 import matplotlib.pyplot as plt
@@ -34,13 +37,66 @@ app = Flask(__name__)
 FUSEKI_ENDPOINT = os.environ.get("FUSEKI_ENDPOINT", "https://lod.sztaki.hu/sparql")
 FUSEKI_TIMEOUT  = int(os.environ.get("FUSEKI_TIMEOUT", "75"))
 MAX_TOKENS      = int(os.environ.get("LLM_MAX_TOKENS", "1200"))
-SECRET_KEY      = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
 DB_PATH         = os.environ.get("MEMORY_DB", "memory.db")
+
+
+def _load_or_create_secret_key() -> bytes:
+    """
+    FLASK_SECRET_KEY should be set explicitly in production. If it isn't, the
+    previous fallback (os.urandom(24) evaluated once at import time) generates
+    a NEW random key every time the process starts — under any multi-worker
+    deployment (e.g. gunicorn with >1 worker), each worker gets its own key,
+    so a session cookie signed by one worker is rejected by another, silently
+    resetting the user's thread_id/conversation mid-session. Persisting an
+    auto-generated key to a local file keeps it stable across restarts and
+    workers on the same host. (Still not a substitute for setting
+    FLASK_SECRET_KEY yourself in a real multi-host deployment.)
+    """
+    env_key = os.environ.get("FLASK_SECRET_KEY")
+    if env_key:
+        return env_key.encode()
+    key_path = os.environ.get("SECRET_KEY_FILE", ".flask_secret_key")
+    try:
+        if os.path.exists(key_path):
+            with open(key_path, "rb") as f:
+                return f.read()
+        key = os.urandom(24)
+        with open(key_path, "wb") as f:
+            f.write(key)
+        return key
+    except OSError:
+        # Read-only filesystem or similar — fall back to a per-process key,
+        # same as the previous behavior.
+        return os.urandom(24)
+
+
+SECRET_KEY = _load_or_create_secret_key()
 
 app.secret_key = SECRET_KEY
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
-llm = ChatOllama(model="llama3.1", temperature=0, seed=42, num_predict=MAX_TOKENS)
+# Requires ANTHROPIC_API_KEY in the environment.
+# NOTE: temperature/top_p/top_k are deprecated on Opus 4.7+ (including 4.8) and
+# now return a 400 if set to any value, including 0. Previously this app relied
+# on temperature=0 (+ a fixed seed under Ollama) for deterministic SPARQL output;
+# that knob no longer exists here. Determinism now comes entirely from the
+# STRICT INSTRUCTIONS blocks in the prompts (generate_sparql, check_data_availability)
+# — if you notice more output variance than before, tighten those instructions
+# rather than trying to re-add a sampling parameter.
+llm = ChatAnthropic(model="claude-opus-4-8", max_tokens=MAX_TOKENS)
+
+# ── PROMPT CACHING ──────────────────────────────────────────────────────────
+# CURATED_SCHEMA + ENDPOINT_FACTS (~3,500 tokens) is identical on every call to
+# check_data_availability() AND generate_sparql(). QUERY_EXAMPLES (~2,450 tokens)
+# is additionally identical across every generate_sparql() call, including retries.
+# Both blocks are marked as cache breakpoints below (max 4 allowed per request).
+# First call in a session pays full input price and writes the cache; every call
+# within the ~5 min TTL after that reads these blocks at ~10% of input price.
+_SCHEMA_BLOCK    = CURATED_SCHEMA + "\n\n" + ENDPOINT_FACTS
+_EXAMPLES_BLOCK  = SPARQL_PREFIXES + "\n\n" + QUERY_EXAMPLES
+
+def _cached(text: str) -> dict:
+    return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
 
 _REQUIRED  = re.compile(r'\bSELECT\b.+\bWHERE\b.+\{', re.DOTALL | re.IGNORECASE)
 _WRITE_OPS = re.compile(r'\b(INSERT|DELETE|DROP|CLEAR|LOAD|CREATE)\b', re.IGNORECASE)
@@ -69,11 +125,7 @@ def check_data_availability(user_query: str) -> dict:
     vocabulary, so an unavailable request doesn't come back sounding like an
     endorsement of whatever the user happened to ask for.
     """
-    prompt = f"""{CURATED_SCHEMA}
-
-{ENDPOINT_FACTS}
-
-You are checking whether a user's question can be answered using ONLY the
+    instructions = f"""You are checking whether a user's question can be answered using ONLY the
 classes and properties listed in the schema above — nothing else.
 
 User question: "{user_query}"
@@ -89,8 +141,12 @@ Rules for "reason":
 - If unavailable, just state that the schema has no matching class or
   property — do not guess what the user might have meant.
 """
+    messages = [
+        SystemMessage(content=[_cached(_SCHEMA_BLOCK)]),
+        HumanMessage(content=instructions),
+    ]
     try:
-        raw = llm.invoke(prompt).content.strip()
+        raw = llm.invoke(messages).content.strip()
         raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         parsed = json.loads(match.group(0) if match else raw)
@@ -100,8 +156,20 @@ Rules for "reason":
         }
     except Exception as e:
         print(f"[AVAILABILITY CHECK ERROR] {e}")
-        # Fail open — a parsing hiccup here shouldn't block a legitimate query
-        return {"available": True, "reason": ""}
+        # Fail CLOSED. This used to fail open ("a parsing hiccup shouldn't
+        # block a legitimate query"), but the actual downstream effect of
+        # letting an unverifiable question through is worse: generate_sparql
+        # has its own safety-net fallback (a generic "list 15 works" query)
+        # for when it can't produce anything meaningful, and summarize_node
+        # will happily narrate whatever rows come back as if they answer the
+        # question. A question we couldn't verify against the schema should
+        # surface as "couldn't verify," not risk being answered with
+        # unrelated data. This only fires on a parsing/LLM error, which is
+        # rare — legitimate in-schema questions are unaffected.
+        return {
+            "available": False,
+            "reason": "Could not verify this question against the schema right now.",
+        }
 
 
 def _ensure_graph_scope(body: str) -> str:
@@ -219,15 +287,7 @@ SELECT DISTINCT ?label WHERE {{
 
 
 def generate_sparql(user_query: str, entity_context: str = "", retry_hint: str = "") -> str:
-    prompt = f"""{SPARQL_PREFIXES}
-
-{CURATED_SCHEMA}
-
-{ENDPOINT_FACTS}
-
-{QUERY_EXAMPLES}
-
-You are a SPARQL expert for the SZTAKI LOD knowledge graph.
+    instructions = f"""You are a SPARQL expert for the SZTAKI LOD knowledge graph.
 
 Generate ONE valid SPARQL SELECT query for this question:
 "{user_query}"
@@ -245,9 +305,15 @@ STRICT INSTRUCTIONS:
 - NEVER use BIND(), CONTAINS(), STRSTARTS(), LCASE(), SUBSTR() — this endpoint is SPARQL 1.0 only
 - PREFER exact matching over filtering: for known value sets (content type, language) use
   an exact triple pattern or equality (?type = dcmitype:Sound), not a FILTER at all
-- For multi-valued properties (format, type, identifier) or year filtering, fetch the
-  property unfiltered with OPTIONAL and let the application split/compare the values —
-  do NOT add a FILTER just to isolate one of the values
+- For multi-valued properties (format, type, identifier), fetch the property
+  unfiltered with OPTIONAL — do NOT add a FILTER just to isolate one value
+- For year/date-range questions (e.g. "published in 2003", "between 2000 and 2005"),
+  DO filter directly in SPARQL using plain comparison operators on the string-typed
+  date, which are core SPARQL 1.0 and NOT in the banned function list above:
+  FILTER(?date >= "2003" && ?date < "2004")
+  This works correctly even when ?date holds a full timestamp (e.g. "2003-03-13
+  06:00:00+01"), because ISO-style date strings sort lexically in chronological
+  order. Never use STRSTARTS/SUBSTR for this — plain >= / < is sufficient and allowed.
 - ONLY use regex() as a last-resort fallback, and only for genuine free-text keyword
   search on a user-supplied term (title/subject/description/author name substring
   search) where no exact-match alternative exists: regex(?var, "keyword", "i")
@@ -257,9 +323,13 @@ OUTPUT RULES:
 - ONLY the raw SPARQL query
 - No markdown, no explanation
 - Start directly with SELECT DISTINCT (do NOT include PREFIX lines — added automatically)
-- End with LIMIT 15
+- End with LIMIT 200
 """
-    raw = llm.invoke(prompt).content.strip()
+    messages = [
+        SystemMessage(content=[_cached(_SCHEMA_BLOCK), _cached(_EXAMPLES_BLOCK)]),
+        HumanMessage(content=instructions),
+    ]
+    raw = llm.invoke(messages).content.strip()
 
     # Strip markdown fences
     raw = re.sub(r"```[a-zA-Z]*", "", raw).replace("```", "").strip()
@@ -320,7 +390,15 @@ def execute_sparql(sparql: str) -> list | str:
         print(f"[BINDINGS COUNT] {len(bindings)}")
         if not bindings:
             return "DATABASE_EMPTY"
-        return [{k: v["value"] for k, v in row.items()} for row in bindings[:15]]
+        # SAFETY_ROW_CAP guards against a pathological response (e.g. a generated
+        # query missing its LIMIT clause), NOT a display/aggregation cap — every
+        # generated query already carries "LIMIT 200" per generate_sparql's
+        # instructions, so this cap is set well above that on purpose. Capping
+        # this at 15 (as before) silently threw away up to ~185 rows before the
+        # chart or the summary ever saw them, producing wrong aggregate counts
+        # and breakdowns for any list-style (non-GROUP-BY) query.
+        SAFETY_ROW_CAP = 500
+        return [{k: v["value"] for k, v in row.items()} for row in bindings[:SAFETY_ROW_CAP]]
     except requests.exceptions.ConnectionError as e:
         print(f"[CONNECTION ERROR] {e}")
         return f"ENDPOINT_UNREACHABLE: Cannot connect to {FUSEKI_ENDPOINT}"
@@ -407,6 +485,65 @@ numeric or countable dimension), respond with ONLY:
     return plan
 
 
+MAX_CHART_BUCKETS = 15   # bar/line: readable ceiling on distinct categories
+MAX_PIE_SLICES     = 7    # pie: fewer slices stay legible; rest folds into "Other"
+
+# Columns that plausibly identify the underlying entity a row is about (?item /
+# ?work are what every example query in knowledge_graph.py names its subject
+# variable). Used to de-duplicate rows before counting — see _count_by_label.
+_ENTITY_KEY_CANDIDATES = ("item", "work", "s", "subject", "uri", "entity")
+
+
+def _entity_key_column(data: list, keys: list) -> str | None:
+    """
+    Find the column that identifies "one row per real-world entity" (typically
+    ?item/?work), so COUNT-style aggregation can count DISTINCT entities rather
+    than raw result rows.
+
+    This matters because several documented properties in this dataset are
+    multi-valued per item (dcterms:format has a MIME type AND a duration,
+    dcterms:type has a dcmitype URI AND a plain-text label, dcterms:identifier
+    sometimes repeats) and the recommended query pattern is to OPTIONAL-fetch
+    them unfiltered. Any query that joins one of those alongside a groupable
+    column produces 2+ SPARQL rows per real item — counting rows directly would
+    silently double/triple that bucket's count.
+    """
+    for name in _ENTITY_KEY_CANDIDATES:
+        for k in keys:
+            if k.lower() == name:
+                vals = [row.get(k) for row in data if row.get(k) not in (None, "")]
+                if vals:
+                    return k
+    return None
+
+
+def _count_by_label(data: list, label_key: str, keys: list) -> Counter:
+    """
+    Build a Counter of label -> count that reflects DISTINCT entities per
+    bucket, not raw rows, so multi-valued OPTIONAL columns elsewhere in the
+    row don't inflate the numbers (see _entity_key_column).
+    """
+    entity_key = _entity_key_column(data, keys)
+    if entity_key and entity_key != label_key:
+        seen = {}
+        for row in data:
+            label = _clean_label(row.get(label_key), "")
+            if not label:
+                continue
+            seen.setdefault(label, set()).add(row.get(entity_key))
+        return Counter({label: len(ids) for label, ids in seen.items()})
+
+    # No entity-id column available — fall back to de-duplicating whole rows
+    # (removes exact duplicate triples, which the dataset is known to contain)
+    # before counting. This won't catch every multi-value inflation case, but
+    # it's strictly more accurate than counting raw rows.
+    dedup_rows = {tuple(sorted(row.items())) for row in data}
+    return Counter(
+        _clean_label(dict(row).get(label_key), "")
+        for row in dedup_rows
+    )
+
+
 def _best_count_column(data: list, keys: list) -> str | None:
     """
     Pick the categorical column that produces the most meaningful COUNT
@@ -420,7 +557,7 @@ def _best_count_column(data: list, keys: list) -> str | None:
     publishers, rather than 13 works each on their own distinct date).
     """
     best_key, best_score = None, 0
-    for k in keys:
+    for k in sorted(keys):  # deterministic tie-breaking, not set-hash order
         vals = [row.get(k) for row in data if row.get(k) not in (None, "")]
         if not vals:
             continue
@@ -432,6 +569,42 @@ def _best_count_column(data: list, keys: list) -> str | None:
         if score > best_score:
             best_key, best_score = k, score
     return best_key
+
+
+# Preferred label columns when picking an axis for a genuinely numeric value
+# column — favors human-readable descriptive fields over IDs/timestamps/URLs.
+_PREFERRED_LABEL_NAMES = (
+    "title", "name", "label", "publisher", "authorname", "author",
+    "subject", "type", "series", "date",
+)
+
+
+def _best_label_column(data: list, keys: list, exclude: str) -> str:
+    """
+    Deterministically choose a label/axis column to pair with a known numeric
+    value column, instead of taking whichever key happened to come out first
+    from Python's (unordered) set() — that could pair a count with something
+    meaningless like a raw identifier URL.
+
+    Preference order: 1) a recognizably descriptive column name, 2) the column
+    with the best repeat-to-distinct ratio (same scoring as _best_count_column,
+    which also works fine for per-item-unique labels), 3) the first column
+    alphabetically as a last, fully deterministic resort.
+    """
+    candidates = [k for k in keys if k != exclude]
+    if not candidates:
+        return exclude
+
+    for name in _PREFERRED_LABEL_NAMES:
+        for k in sorted(candidates):
+            if k.lower() == name:
+                return k
+
+    scored = _best_count_column(data, candidates)
+    if scored:
+        return scored
+
+    return sorted(candidates)[0]
 
 
 def _render_matplotlib_chart(labels: list, values: list, chart_type: str, title: str) -> str:
@@ -466,6 +639,28 @@ def _render_matplotlib_chart(labels: list, values: list, chart_type: str, title:
     return f"data:image/png;base64,{encoded}"
 
 
+def _cap_buckets(counts: Counter, chart_type: str) -> tuple[list, list, bool]:
+    """
+    Cap a label->value Counter to a readable number of buckets. Anything
+    beyond the cap is folded into an explicit "Other" bucket instead of just
+    being dropped — dropping it silently (the previous behavior) makes a pie
+    chart's slices sum to 100% of only the shown subset, implying completeness
+    the data doesn't have. Returns (labels, values, was_truncated).
+    """
+    cap = MAX_PIE_SLICES if chart_type == "pie" else MAX_CHART_BUCKETS
+    top = counts.most_common()
+    if len(top) <= cap:
+        labels = [k for k, _ in top]
+        values = [float(v) for _, v in top]
+        return labels, values, False
+
+    shown = top[:cap]
+    rest_total = sum(v for _, v in top[cap:])
+    labels = [k for k, _ in shown] + ["Other"]
+    values = [float(v) for _, v in shown] + [float(rest_total)]
+    return labels, values, True
+
+
 def try_build_visualization(data: list, user_query: str) -> dict | None:
     """
     Decide whether the retrieved rows are worth charting, and if so, render an
@@ -477,14 +672,15 @@ def try_build_visualization(data: list, user_query: str) -> dict | None:
          all (_plan_visualization). Falls back to a simple numeric-column
          heuristic only when there's an unambiguous numeric/aggregate column,
          so genuinely non-chartable text lists still return None.
-      3. Build clean label/value arrays from the columns chosen.
+      3. Build clean label/value arrays from the columns chosen, counting
+         DISTINCT entities (not raw rows) and capping bucket count honestly.
       4. Render with Matplotlib → base64 PNG.
       5. Package the image together with the LLM's short description.
     """
     if not isinstance(data, list) or len(data) < 2:
         return None
 
-    keys = list({k for row in data for k in row.keys()})
+    keys = sorted({k for row in data for k in row.keys()})  # deterministic order
     plan = _plan_visualization(data, user_query, keys)
 
     if plan is None:
@@ -496,7 +692,7 @@ def try_build_visualization(data: list, user_query: str) -> dict | None:
                            ("count", "total", "score", "num", "amount", "freq", "n")]
         value_key = (numeric_keys or aggregate_keys or [None])[0]
         if value_key:
-            label_key = next((k for k in keys if k != value_key), value_key)
+            label_key = _best_label_column(data, keys, exclude=value_key)
             plan = {
                 "chart_type": "bar",
                 "label_column": label_key,
@@ -522,28 +718,47 @@ def try_build_visualization(data: list, user_query: str) -> dict | None:
     chart_type  = plan.get("chart_type", "bar")
     description = plan.get("description") or f"Shows {value_key} by {label_key}."
 
+    truncated = False
     if value_key == "COUNT":
-        counts = Counter(
-            _clean_label(row.get(label_key), f"Item {i+1}") for i, row in enumerate(data)
-        )
-        # Cap to the top buckets so the chart stays readable if there are many
-        top = counts.most_common(15)
-        labels = [k for k, _ in top]
-        values = [float(v) for _, v in top]
+        counts = _count_by_label(data, label_key, keys)
+        labels, values, truncated = _cap_buckets(counts, chart_type)
         title = f"Count by {label_key}"
     else:
-        labels, values = [], []
+        # Real numeric column: dedupe by entity id (if we can identify one) so
+        # a multi-valued OPTIONAL join doesn't plot the same item's value twice.
+        entity_key = _entity_key_column(data, keys)
+        seen_entities = set()
+        raw_pairs = []
         for i, row in enumerate(data):
             try:
                 val = float(row.get(value_key))
             except Exception:
                 continue
-            labels.append(_clean_label(row.get(label_key), f"Item {i+1}"))
-            values.append(val)
+            if entity_key:
+                eid = row.get(entity_key)
+                if eid in seen_entities:
+                    continue
+                seen_entities.add(eid)
+            raw_pairs.append((_clean_label(row.get(label_key), f"Item {i+1}"), val))
+
+        cap = MAX_PIE_SLICES if chart_type == "pie" else MAX_CHART_BUCKETS
+        if len(raw_pairs) > cap:
+            raw_pairs.sort(key=lambda p: p[1], reverse=True)
+            shown, rest = raw_pairs[:cap], raw_pairs[cap:]
+            if chart_type == "pie":
+                # Fold the remainder into "Other" so slices still sum honestly
+                # to the true total rather than only the shown subset.
+                shown.append(("Other", sum(v for _, v in rest)))
+            raw_pairs = shown
+            truncated = True
+        labels = [p[0] for p in raw_pairs]
+        values = [p[1] for p in raw_pairs]
         title = f"{label_key} · {value_key}"
 
     if len(labels) < 2:
         return None
+    if truncated:
+        description = description.rstrip(".") + f" (showing the top {len(labels)} categories; smaller ones are grouped)."
     try:
         image = _render_matplotlib_chart(labels, values, chart_type, title)
     except Exception as e:
@@ -656,12 +871,20 @@ def summarize_node(state: ResearchState) -> ResearchState:
         else:
             context = f"The query failed: {results}"
     else:
+        SUMMARY_ROW_CAP = 15
+        total_rows = len(results)
         clean = [
             {k: (v.split("/")[-1].replace("_", " ") if str(v).startswith("http") else v)
              for k, v in row.items()}
-            for row in results
+            for row in results[:SUMMARY_ROW_CAP]
         ]
         context = json.dumps(clean, ensure_ascii=False, indent=2)
+        if total_rows > SUMMARY_ROW_CAP:
+            context += (
+                f"\n\n(Showing {SUMMARY_ROW_CAP} of {total_rows} total matching rows — "
+                "the full set is reflected in the chart above, if one was generated. "
+                "Mention the total count in your answer rather than listing every row.)"
+            )
 
     viz = state.get("viz")
     chart_instruction = (
@@ -839,14 +1062,26 @@ def graph():
     return render_template("graph.html")
 
 
+GRAPH_DATA_LIMIT = 10000  # per-request triple cap — see docstring below
+
 @app.route("/graph/data")
 def graph_data():
-    """Fetch ALL nodes and edges from the SZTAKI graph."""
+    """
+    Fetch a bounded SAMPLE of nodes and edges from the SZTAKI graph for the
+    explorer view.
+
+    NOT "all" data: the graph holds ~807K works, ~38K people, and 2.7M+
+    rdf:type triples alone (see ENDPOINT_FACTS) — far more than any browser
+    can usefully render. This endpoint caps at GRAPH_DATA_LIMIT triples and
+    reports whether that cap was hit via the "truncated" field in the
+    response, so the frontend/user can show a "partial view" notice instead
+    of silently implying this is the whole graph.
+    """
     query = SPARQL_PREFIXES + f"""
     SELECT DISTINCT ?s ?p ?o
     WHERE {{
       GRAPH <{NDA_GRAPH}> {{
-        # Fetch all triples where the subject is a work or person
+        # Fetch triples where the subject is a work or person
         {{
           ?s a dbo:Work .
           ?s ?p ?o .
@@ -854,7 +1089,7 @@ def graph_data():
           ?s a foaf:Person .
           ?s ?p ?o .
         }} UNION {{
-          # Fetch all triples where the object is a work or person
+          # Fetch triples where the object is a work or person
           ?s ?p ?work .
           ?work a dbo:Work .
         }} UNION {{
@@ -863,7 +1098,27 @@ def graph_data():
         }}
       }}
     }}
-    LIMIT 10000
+    LIMIT {GRAPH_DATA_LIMIT}
+    """
+
+    # Dedicated (?s, ?type) query, run separately from the general triple
+    # query above. Previously, node type came only from whichever rdf:type
+    # triples happened to survive the general query's shared 10000-row
+    # budget — a node whose OTHER properties filled that budget first could
+    # end up permanently mis-typed as "other" even though its type triple
+    # exists in the graph. Asking for (?s, ?type) pairs on their own spends
+    # the same size budget entirely on type correctness instead of competing
+    # with every other property, so far more nodes get typed correctly.
+    types_query = SPARQL_PREFIXES + f"""
+    SELECT DISTINCT ?s ?type
+    WHERE {{
+      GRAPH <{NDA_GRAPH}> {{
+        {{ ?s a dbo:Work . ?s a ?type . }}
+        UNION
+        {{ ?s a foaf:Person . ?s a ?type . }}
+      }}
+    }}
+    LIMIT {GRAPH_DATA_LIMIT}
     """
 
     def sparql_query(q):
@@ -882,8 +1137,10 @@ def graph_data():
             pass
         return []
 
-    bindings = sparql_query(query)
-    print(f"Fetched {len(bindings)} triples from SPARQL endpoint.")  # Debugging
+    bindings   = sparql_query(query)
+    type_rows  = sparql_query(types_query)
+    print(f"Fetched {len(bindings)} triples and {len(type_rows)} type pairs from SPARQL endpoint.")  # Debugging
+    truncated = len(bindings) >= GRAPH_DATA_LIMIT or len(type_rows) >= GRAPH_DATA_LIMIT
 
     TYPE_MAPPINGS = {
         "http://dbpedia.org/ontology/Work": "work",
@@ -907,15 +1164,27 @@ def graph_data():
         "sameAs": "same as",
     }
 
+    # Build the (?s -> mapped type) lookup from the dedicated types query,
+    # independent of whether each subject's rdf:type triple also happened to
+    # survive the general triple query's own row cap.
+    type_lookup = {}
+    for row in type_rows:
+        s = row["s"]["value"]
+        t = row["type"]["value"]
+        mapped = TYPE_MAPPINGS.get(t, "other")
+        # A subject can carry multiple co-types (e.g. dbo:Work + schema:Thing);
+        # keep the most specific mapped type rather than the last one seen.
+        if s not in type_lookup or type_lookup[s] == "other":
+            type_lookup[s] = mapped
+
     nodes = {}
     edges = []
-    subject_nodes = {}  # Track subject literals as nodes
 
-    def add_node(nid, ntype="other", label=None, props=None):
+    def add_node(nid, ntype=None, label=None, props=None):
         if nid not in nodes:
             nodes[nid] = {
                 "id": nid,
-                "type": ntype,
+                "type": ntype or type_lookup.get(nid, "other"),
                 "label": label or nid.split("/")[-1],
                 "props": props or {}
             }
@@ -949,17 +1218,27 @@ def graph_data():
             if p == "http://purl.org/dc/terms/subject":
                 subject_value = o.strip('"')
                 if subject_value:
-                    subject_id = f"concept_{abs(hash(subject_value)) % 100000}"
+                    # Stable, collision-resistant id (Python's built-in hash()
+                    # is randomized per-process and not collision-resistant
+                    # over a 100k-bucket space — two different subject strings
+                    # could silently merge into the same concept node, and IDs
+                    # would also change on every process restart).
+                    digest = hashlib.md5(subject_value.encode("utf-8")).hexdigest()[:12]
+                    subject_id = f"concept_{digest}"
                     add_node(subject_id, "concept", subject_value, {"scheme": "NDA Hungary"})
                     add_edge(s, p, subject_id)
         else:
-            # Add object node (if it's a URI)
+            # Add object node (if it's a URI) — type comes from type_lookup
+            # via add_node's default, then rdf:type triples below can still
+            # refine/confirm it from what's actually present in this batch.
             add_node(o)
             # Add edge
             add_edge(s, p, o)
             # Handle rdf:type
             if p == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type":
-                nodes[s]["type"] = TYPE_MAPPINGS.get(o, "other")
+                mapped = TYPE_MAPPINGS.get(o, "other")
+                if mapped != "other" or nodes[s]["type"] == "other":
+                    nodes[s]["type"] = mapped
             # Handle dcterms:isPartOf (series)
             if p == "http://purl.org/dc/terms/isPartOf":
                 nodes[o]["type"] = "series"
@@ -969,12 +1248,24 @@ def graph_data():
     return jsonify({
         "nodes": list(nodes.values()),
         "edges": edges,
+        "truncated": truncated,
+        "note": (
+            f"Showing a sample of up to {GRAPH_DATA_LIMIT} triples out of a "
+            "much larger graph (see ENDPOINT_FACTS for full counts) — this "
+            "is not the complete graph."
+        ) if truncated else None,
     })
 
 
-@app.route("/sparql")
-def sparql_explorer():
-    return render_template('sparql.html')
+@app.route("/about")
+def about():
+    return render_template(
+        'about.html',
+        endpoint=FUSEKI_ENDPOINT,
+        graph_uri=NDA_GRAPH,
+        work_count="807,878",
+        person_count="37,777",
+    )
 
 
 if __name__ == "__main__":

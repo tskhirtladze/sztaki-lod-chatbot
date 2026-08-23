@@ -1,4 +1,3 @@
-
 // ═══════════════════════════════════════════════════════
 //  COLOUR / TYPE HELPERS
 // ═══════════════════════════════════════════════════════
@@ -373,7 +372,6 @@ function showTooltip(n, cx, cy) {
 // ── Select node ───────────────────────────────────────
 function selectNode(n) {
     selectedNode = n;
-    simRunning = true; tickCount = 0;
 
     // detail panel
     document.getElementById('detail-panel').classList.remove('empty');
@@ -480,6 +478,37 @@ function toggleFilter(btn) {
     buildNodeList();
     simRunning = true; tickCount = 0;
 }
+
+// ── Fullscreen ────────────────────────────────────────
+function toggleCanvasFullscreen() {
+    const wrap = document.getElementById('canvas-wrap');
+    if (!document.fullscreenElement) {
+        (wrap.requestFullscreen || wrap.webkitRequestFullscreen || wrap.msRequestFullscreen)
+            .call(wrap)
+            .catch(err => console.error('Failed to enter fullscreen:', err));
+    } else {
+        (document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen)
+            .call(document);
+    }
+}
+
+function updateFullscreenUI() {
+    const isFs = !!document.fullscreenElement;
+    const wrap = document.getElementById('canvas-wrap');
+    wrap.classList.toggle('is-fullscreen', isFs);
+    const btn = document.getElementById('btn-fullscreen');
+    if (btn) {
+        btn.title = isFs ? 'Exit fullscreen' : 'Fullscreen';
+        btn.innerHTML = isFs
+            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"/></svg>'
+            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>';
+    }
+    // let the browser finish the layout change before resizing the canvas
+    setTimeout(resize, 60);
+}
+
+['fullscreenchange', 'webkitfullscreenchange', 'msfullscreenchange']
+    .forEach(evt => document.addEventListener(evt, updateFullscreenUI));
 
 // ── Camera ────────────────────────────────────────────
 function zoomBy(factor) {
