@@ -1,147 +1,94 @@
 {% extends "base.html" %}
-
-{% block title %}SZTAKI LOD · Knowledge Graph{% endblock %}
-{% block graph_active %}active{% endblock %}
-
-{% block extra_css %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/graph.css') }}">
-<style>
-    /* Override base.html dark theme with white background */
-    :root {
-        --bg: #ffffff;
-        --bg2: #f8f9fa;
-        --surface: #ffffff;
-        --surface2: #f8f9fa;
-        --border: #e0e0e0;
-        --border-hi: #cccccc;
-        --text: #1a1a1a;
-        --text-dim: #6c757d;
-        --text-muted: #9ca3af;
-    }
-
-    /* Force white background for the page and graph */
-    body {
-        background-color: var(--bg) !important;
-    }
-
-    #app-body {
-        background-color: var(--bg) !important;
-    }
-
-    #canvas-wrap {
-        background-color: var(--bg) !important;
-    }
-
-    #graph-canvas {
-        background-color: white !important;
-    }
-
-    /* Remove noise overlay from base.html */
-    body::before {
-        display: none !important;
-    }
-
-    /* Adjust grid opacity for white background */
-    #canvas-wrap::before {
-        opacity: 0.05 !important;
-    }
-
-    /* Ensure loading overlay is visible on white background */
-    #graph-loading {
-        background: rgba(255, 255, 255, 0.9) !important;
-    }
-</style>
-{% endblock %}
-
+{% block title %}Explore graph · NDA Explorer{% endblock %}
 {% block content %}
-<div id="app-body">
-    <!-- LEFT: node list -->
-    <aside id="left-panel">
+<div class="graph-shell">
+
+    <aside class="graph-panel panel-left">
         <div class="panel-header">
-            <div class="panel-header-title">Graph Explorer</div>
-            <div class="panel-header-sub">Browse · Filter · Select nodes</div>
+            <p class="panel-title">Search &amp; filter</p>
+            <input
+                class="search-input"
+                id="search-input"
+                type="text"
+                placeholder="Search nodes by name…"
+                oninput="filterNodes()"
+            >
         </div>
-
-        <div class="search-wrap">
-            <div class="search-inner">
-                <svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-                </svg>
-                <input id="search-input" type="text" placeholder="Search nodes…" oninput="filterNodes()">
-            </div>
-        </div>
-
         <div class="filter-row">
-            <button class="filter-chip chip-work active" data-type="work" onclick="toggleFilter(this)">Work</button>
-            <button class="filter-chip chip-person active" data-type="person" onclick="toggleFilter(this)">Person</button>
-            <button class="filter-chip chip-sound active" data-type="sound" onclick="toggleFilter(this)">Audio</button>
-            <button class="filter-chip chip-concept active" data-type="concept" onclick="toggleFilter(this)">Concept</button>
+            <button class="filter-chip active" data-type="work" onclick="toggleFilter(this)">
+                <span class="dot" style="background:#B9720F"></span>Works
+            </button>
+            <button class="filter-chip active" data-type="person" onclick="toggleFilter(this)">
+                <span class="dot" style="background:#2A4B7C"></span>People
+            </button>
+            <button class="filter-chip active" data-type="sound" onclick="toggleFilter(this)">
+                <span class="dot" style="background:#1F8A6F"></span>Audio
+            </button>
+            <button class="filter-chip active" data-type="concept" onclick="toggleFilter(this)">
+                <span class="dot" style="background:#7C5CB0"></span>Subjects
+            </button>
+            <button class="filter-chip active" data-type="series" onclick="toggleFilter(this)">
+                <span class="dot" style="background:#B23A48"></span>Series
+            </button>
+            <button class="filter-chip active" data-type="other" onclick="toggleFilter(this)">
+                <span class="dot" style="background:#7A7566"></span>Other
+            </button>
         </div>
-
-        <div id="node-list"></div>
+        <div class="node-list" id="node-list">
+            <div class="list-empty">Loading…</div>
+        </div>
     </aside>
 
-    <!-- CENTRE: canvas -->
-    <div id="canvas-wrap">
-        <canvas id="graph-canvas"></canvas>
-
-        <div id="graph-loading">
-            <div class="loading-spinner"></div>
-            <div class="loading-label">Building knowledge graph…</div>
+    <div class="canvas-wrap" id="canvas-wrap">
+        <div class="graph-stats">
+            <div class="graph-stat"><strong id="stat-nodes">0</strong> nodes</div>
+            <div class="graph-stat"><strong id="stat-edges">0</strong> links</div>
+            <div class="graph-stat" id="stat-selected" style="display:none">Viewing <strong id="stat-sel-label"></strong></div>
         </div>
 
-        <div id="canvas-legend">
-            <div class="legend-title">Node Types</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>dbo:Work</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>foaf:Person</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>dcmitype:Sound</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div>skos:Concept</div>
-            <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div>Series / Other</div>
-        </div>
-
-        <div id="canvas-stats">
-            <div class="stat-pill"><strong id="stat-nodes">0</strong> nodes</div>
-            <div class="stat-pill"><strong id="stat-edges">0</strong> edges</div>
-            <div class="stat-pill" id="stat-selected" style="display:none"><strong id="stat-sel-label">—</strong> selected</div>
-        </div>
-
-        <div id="canvas-controls">
-            <button class="ctrl-btn" onclick="zoomBy(1.25)" title="Zoom in">+</button>
-            <button class="ctrl-btn" onclick="zoomBy(0.8)" title="Zoom out">−</button>
-            <button class="ctrl-btn" onclick="resetLayout()" title="Reset">⟳</button>
-            <button class="ctrl-btn" id="btn-fullscreen" onclick="toggleCanvasFullscreen()" title="Fullscreen">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/>
-                </svg>
+        <div class="graph-toolbar">
+            <button class="btn-icon" title="Zoom in" onclick="zoomBy(1.25)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>
+            </button>
+            <button class="btn-icon" title="Zoom out" onclick="zoomBy(0.8)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/></svg>
+            </button>
+            <button class="btn-icon" title="Reset layout" onclick="resetLayout()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 4v5h-5"/></svg>
+            </button>
+            <button class="btn-icon" id="btn-expand" title="Zoom to fit" onclick="toggleExpand()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+            </button>
+            <button class="btn-icon" id="btn-fullscreen" title="Fullscreen" onclick="toggleCanvasFullscreen()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
             </button>
         </div>
 
-        <div id="node-tooltip">
-            <div class="tooltip-title" id="tt-title"></div>
-            <div class="tooltip-type" id="tt-type"></div>
+        <canvas id="graph-canvas"></canvas>
+
+        <div class="node-tooltip" id="node-tooltip">
+            <div id="tt-title"></div>
+            <div id="tt-type"></div>
             <div id="tt-props"></div>
+        </div>
+
+        <div class="graph-loading" id="graph-loading">
+            <div class="graph-loading-inner">
+                <div class="loading-spinner"></div>
+                Loading a sample of the graph…
+            </div>
         </div>
     </div>
 
-    <!-- RIGHT: detail -->
-    <aside id="detail-panel" class="empty">
-        <div id="detail-content">
-            <div class="detail-empty">
-                <div class="detail-empty-icon">◎</div>
-                <div class="detail-empty-text">
-                    Click any node<br>
-                    to inspect its properties<br>
-                    and connections
-                </div>
-            </div>
+    <aside class="graph-panel panel-right detail-panel empty" id="detail-panel">
+        <div class="detail-empty-state">
+            Click any node to see its properties and connections here.
         </div>
+        <div class="detail-content" id="detail-content"></div>
     </aside>
+
 </div>
 {% endblock %}
-
 {% block scripts %}
-<script>
-    window.GRAPH_DATA = null;
-</script>
 <script src="{{ url_for('static', filename='js/graph.js') }}"></script>
 {% endblock %}

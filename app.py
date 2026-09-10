@@ -450,6 +450,9 @@ JSON object (no markdown, no extra text):
 {{"visualize": true, "chart_type": "bar" or "pie" or "line",
   "label_column": "<one of the result columns above>",
   "value_column": "<one of the result columns above holding real numbers, OR the literal string \\"COUNT\\">",
+  "title": "<short, human-readable chart title — e.g. 'Works Published by Year', never a raw column/variable name like 'pubYear'>",
+  "x_label": "<human-readable axis label for label_column — e.g. 'Year', 'Creator', 'Format'>",
+  "y_label": "<human-readable axis label for value_column — e.g. 'Number of Works' when value_column is COUNT, or a readable version of the real column name otherwise>",
   "description": "one short plain-English sentence describing what the chart shows"}}
 
 Most result sets are one row per item (e.g. one row per work) with no numeric
@@ -482,7 +485,14 @@ numeric or countable dimension), respond with ONLY:
         return None  # same, for the value column — unless it's the COUNT sentinel
     if plan.get("chart_type") not in ("bar", "pie", "line"):
         plan["chart_type"] = "bar"
+    # title/x_label/y_label are optional — try_build_visualization falls back
+    # to sensible defaults built from the column names if the LLM omitted them
+    # or returned something empty/non-string.
+    for field in ("title", "x_label", "y_label"):
+        if not isinstance(plan.get(field), str) or not plan[field].strip():
+            plan[field] = None
     return plan
+
 
 
 MAX_CHART_BUCKETS = 15   # bar/line: readable ceiling on distinct categories
@@ -607,7 +617,8 @@ def _best_label_column(data: list, keys: list, exclude: str) -> str:
     return sorted(candidates)[0]
 
 
-def _render_matplotlib_chart(labels: list, values: list, chart_type: str, title: str) -> str:
+def _render_matplotlib_chart(labels: list, values: list, chart_type: str, title: str,
+                              x_label: str | None = None, y_label: str | None = None) -> str:
     """Render the chart with Matplotlib and return it as a base64 PNG data URI."""
     fig, ax = plt.subplots(figsize=(7.5, 4.5), dpi=130)
 
@@ -617,15 +628,27 @@ def _render_matplotlib_chart(labels: list, values: list, chart_type: str, title:
         ax.axis("equal")
     elif chart_type == "line":
         ax.plot(labels, values, marker="o", color="#4d9fff")
-        ax.set_ylabel("Value")
+        ax.set_ylabel(y_label or "Value")
+        if x_label:
+            ax.set_xlabel(x_label)
         plt.setp(ax.get_xticklabels(), rotation=40, ha="right", fontsize=8)
     else:  # bar — go horizontal for many/long labels so they stay readable
         horizontal = len(labels) > 6 or max((len(l) for l in labels), default=0) > 14
         if horizontal:
             ax.barh(labels, values, color="#f0c040")
             ax.invert_yaxis()
+            # barh swaps the axes: categories run along y, values along x —
+            # so the labels need to swap too, or they'd describe the wrong axis.
+            if x_label:
+                ax.set_ylabel(x_label)
+            if y_label:
+                ax.set_xlabel(y_label)
         else:
             ax.bar(labels, values, color="#f0c040")
+            if x_label:
+                ax.set_xlabel(x_label)
+            if y_label:
+                ax.set_ylabel(y_label)
             plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=8)
 
     ax.set_title(title, fontsize=11, fontweight="bold")
@@ -659,6 +682,39 @@ def _cap_buckets(counts: Counter, chart_type: str) -> tuple[list, list, bool]:
     labels = [k for k, _ in shown] + ["Other"]
     values = [float(v) for _, v in shown] + [float(rest_total)]
     return labels, values, True
+
+
+def _is_sequential_label_set(labels: list) -> bool:
+    """
+    True when every label (aside from a possible "Other" truncation bucket)
+    is itself numeric — years, ages, decades, etc. — meaning the natural
+    reading order is ascending along the axis, not "biggest value first" or
+    "most common first". Category names (formats, creators, subjects) fail
+    this check and keep whatever order they already had.
+    """
+    real_labels = [l for l in labels if l != "Other"]
+    if not real_labels:
+        return False
+    for l in real_labels:
+        try:
+            float(l)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _sort_by_label_ascending(labels: list, values: list) -> tuple[list, list]:
+    """
+    Sorts (label, value) pairs by label ascending. An "Other" truncation
+    bucket, if present, isn't part of the sequence, so it's kept pinned at
+    the end rather than sorted in with the numeric labels.
+    """
+    other_idx = next((i for i, l in enumerate(labels) if l == "Other"), None)
+    pairs = [(l, v) for i, (l, v) in enumerate(zip(labels, values)) if i != other_idx]
+    pairs.sort(key=lambda p: float(p[0]))
+    if other_idx is not None:
+        pairs.append((labels[other_idx], values[other_idx]))
+    return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
 def try_build_visualization(data: list, user_query: str) -> dict | None:
@@ -722,7 +778,7 @@ def try_build_visualization(data: list, user_query: str) -> dict | None:
     if value_key == "COUNT":
         counts = _count_by_label(data, label_key, keys)
         labels, values, truncated = _cap_buckets(counts, chart_type)
-        title = f"Count by {label_key}"
+        fallback_title = f"Count by {label_key}"
     else:
         # Real numeric column: dedupe by entity id (if we can identify one) so
         # a multi-valued OPTIONAL join doesn't plot the same item's value twice.
@@ -753,14 +809,23 @@ def try_build_visualization(data: list, user_query: str) -> dict | None:
             truncated = True
         labels = [p[0] for p in raw_pairs]
         values = [p[1] for p in raw_pairs]
-        title = f"{label_key} · {value_key}"
+        fallback_title = f"{label_key} · {value_key}"
 
     if len(labels) < 2:
         return None
+    if chart_type in ("line", "bar") and _is_sequential_label_set(labels):
+        labels, values = _sort_by_label_ascending(labels, values)
     if truncated:
         description = description.rstrip(".") + f" (showing the top {len(labels)} categories; smaller ones are grouped)."
+
+    # Prefer the LLM's human-readable title/axis labels; fall back to the
+    # raw-column-name versions built above only if it didn't provide them.
+    title   = plan.get("title") or fallback_title
+    x_label = plan.get("x_label") or label_key
+    y_label = plan.get("y_label") or ("Count" if value_key == "COUNT" else value_key)
+
     try:
-        image = _render_matplotlib_chart(labels, values, chart_type, title)
+        image = _render_matplotlib_chart(labels, values, chart_type, title, x_label, y_label)
     except Exception as e:
         print(f"[MATPLOTLIB RENDER ERROR] {e}")
         return None
@@ -769,6 +834,8 @@ def try_build_visualization(data: list, user_query: str) -> dict | None:
         "is_visual":   True,
         "type":        chart_type,
         "title":       title,
+        "x_label":     x_label,
+        "y_label":     y_label,
         "description": description,   # short caption, per requirement 4
         "image":       image,         # data:image/png;base64,... — render with <img>
         "labels":      labels,
@@ -1042,6 +1109,48 @@ def chat():
         })
     except Exception as e:
         return jsonify({"response": str(e)}), 500
+
+
+@app.route("/history", methods=["GET"])
+def history():
+    """
+    Return the conversation saved for the current session's thread, so the
+    frontend can rebuild the chat log after a page reload or navigating away
+    and back — the LangGraph checkpointer already persists this server-side,
+    the UI just never asked for it before.
+
+    sparql_query/viz are only kept in state for the most recent turn (the
+    graph overwrites them each run), so they're attached to the last
+    assistant message only, not retroactively to every past turn.
+    """
+    thread_id = session.get("thread_id")
+    if not thread_id:
+        return jsonify({"messages": []})
+
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        full_state = langgraph_app.get_state(config)
+    except Exception:
+        return jsonify({"messages": []})
+
+    state_vals = full_state.values if full_state else {}
+    raw_messages = state_vals.get("messages", [])
+
+    out = []
+    for m in raw_messages:
+        if isinstance(m, HumanMessage):
+            out.append({"role": "user", "content": m.content})
+        elif isinstance(m, AIMessage):
+            out.append({"role": "assistant", "content": m.content})
+
+    # Attach the last turn's SPARQL/visualization to the last assistant message
+    for entry in reversed(out):
+        if entry["role"] == "assistant":
+            entry["sparql_query"] = state_vals.get("sparql_query")
+            entry["viz"] = state_vals.get("viz")
+            break
+
+    return jsonify({"messages": out})
 
 
 @app.route("/reset", methods=["POST"])

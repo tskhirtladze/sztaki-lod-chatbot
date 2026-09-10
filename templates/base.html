@@ -1,79 +1,31 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <title>{% block title %}SZTAKI LOD{% endblock %}</title>
-
-    <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
-
-    <!-- Global CSS -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
-
-    {% block extra_css %}{% endblock %}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}NDA Explorer{% endblock %}</title>
+<meta name="description" content="Ask questions about Hungary's National Digital Archive - books, radio programmes, photographs and films, linked to their creators and subjects.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+{% block head %}{% endblock %}
 </head>
-
-<body>
-
-<nav id="navbar">
-
-    <a class="nav-logo" href="/">
-        <div class="nav-logo-icon">
-            <svg viewBox="0 0 24 24"
-                 fill="none"
-                 stroke="currentColor"
-                 stroke-width="2.5"
-                 stroke-linecap="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M12 2v4M12 18v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M2 12h4M18 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
-            </svg>
-        </div>
-
-        <div class="nav-logo-text">
-            SZTAKI LOD
-            <span>Hungarian Cultural Heritage</span>
-        </div>
+<body class="{% block bodyclass %}{% endblock %}">
+<header class="site-header">
+    <a class="brand" href="{{ url_for('index') }}">
+        <span class="brand-mark">NDA</span>
+        <span class="brand-name">Explorer</span>
     </a>
-
-    <div class="nav-tabs">
-
-        <a href="/"
-           class="nav-tab {% block chat_active %}{% endblock %}"
-           onclick="if (window.location.pathname === this.pathname) event.preventDefault();">
-            Chat
-        </a>
-
-        <a href="/graph"
-           class="nav-tab {% block graph_active %}{% endblock %}"
-           onclick="if (window.location.pathname === this.pathname) event.preventDefault();">
-            Knowledge Graph
-        </a>
-
-        <a href="/about"
-           class="nav-tab {% block about_active %}{% endblock %}"
-           onclick="if (window.location.pathname === this.pathname) event.preventDefault();">
-            About
-        </a>
-
-    </div>
-
-    <div class="nav-spacer"></div>
-
-    <div class="nav-status">
-        <span class="status-dot"></span>
-        Live
-    </div>
-
-    {% block nav_actions %}{% endblock %}
-
-</nav>
-
+    <nav class="site-nav">
+        <a href="{{ url_for('index') }}" class="{{ 'active' if active == 'chat' else '' }}">Ask</a>
+        <a href="{{ url_for('graph') }}" class="{{ 'active' if active == 'graph' else '' }}">Explore graph</a>
+        <a href="{{ url_for('about') }}" class="{{ 'active' if active == 'about' else '' }}">About</a>
+    </nav>
+</header>
+<main>
 {% block content %}{% endblock %}
-
+</main>
 {% block scripts %}{% endblock %}
-
 </body>
 </html>
