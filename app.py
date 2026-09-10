@@ -989,6 +989,17 @@ Write a clear, concise answer in plain English.
 - Keep it under 120 words
 """
     response = llm.invoke(prompt)
+    # Attach this turn's SPARQL/chart directly to the message via
+    # additional_kwargs, which the checkpointer persists along with it.
+    # sparql_query/viz on ResearchState get overwritten by the very next
+    # turn, so if we don't stamp them onto the message here, they're gone
+    # for good the moment the person asks a second question — this is what
+    # was making earlier charts vanish after navigating away and back.
+    response.additional_kwargs = {
+        **(response.additional_kwargs or {}),
+        "sparql_query": state.get("sparql_query"),
+        "viz": state.get("viz"),
+    }
     return {"messages": [response]}
 
 # ── Build the StateGraph ─────────────────────────────────────────────
@@ -1119,9 +1130,10 @@ def history():
     and back — the LangGraph checkpointer already persists this server-side,
     the UI just never asked for it before.
 
-    sparql_query/viz are only kept in state for the most recent turn (the
-    graph overwrites them each run), so they're attached to the last
-    assistant message only, not retroactively to every past turn.
+    Each assistant message carries its own sparql_query/viz in
+    additional_kwargs (stamped on in summarize_node), so every past turn
+    keeps its own chart — these are no longer read from the top-level state,
+    which only ever reflects the most recent turn.
     """
     thread_id = session.get("thread_id")
     if not thread_id:
@@ -1141,14 +1153,13 @@ def history():
         if isinstance(m, HumanMessage):
             out.append({"role": "user", "content": m.content})
         elif isinstance(m, AIMessage):
-            out.append({"role": "assistant", "content": m.content})
-
-    # Attach the last turn's SPARQL/visualization to the last assistant message
-    for entry in reversed(out):
-        if entry["role"] == "assistant":
-            entry["sparql_query"] = state_vals.get("sparql_query")
-            entry["viz"] = state_vals.get("viz")
-            break
+            kwargs = m.additional_kwargs or {}
+            out.append({
+                "role": "assistant",
+                "content": m.content,
+                "sparql_query": kwargs.get("sparql_query"),
+                "viz": kwargs.get("viz"),
+            })
 
     return jsonify({"messages": out})
 
