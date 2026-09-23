@@ -287,11 +287,13 @@ SELECT DISTINCT ?label WHERE {{
 
 
 def generate_sparql(user_query: str, entity_context: str = "", retry_hint: str = "") -> str:
+    context = f"\n{entity_context}\n" if entity_context else ""
+    prevAttempt = "\nPREVIOUS ATTEMPT FAILED — " + retry_hint + "\n" if retry_hint else ""
     instructions = f"""You are a SPARQL expert for the SZTAKI LOD knowledge graph.
 
 Generate ONE valid SPARQL SELECT query for this question:
 "{user_query}"
-{("\n" + entity_context + "\n") if entity_context else ""}{("\nPREVIOUS ATTEMPT FAILED — " + retry_hint + "\n") if retry_hint else ""}
+{context}{prevAttempt}
 STRICT INSTRUCTIONS:
 - ALWAYS write SELECT DISTINCT (never plain SELECT — data has duplicate triples)
 - ALWAYS wrap the query body in GRAPH <http://lod.sztaki.hu/nda> {{ ... }} — this
