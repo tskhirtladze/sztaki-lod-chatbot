@@ -1,13 +1,13 @@
 // ═══════════════════════════════════════════════════════
-//  COLOUR / TYPE HELPERS
+//  COLOUR / TYPE HELPERS - light paper theme
 // ═══════════════════════════════════════════════════════
 const TYPE_COLOR = {
-    work:    '#f0c040',
-    person:  '#4d9fff',
-    sound:   '#3dd68c',
-    concept: '#b97dff',
-    series:  '#f04f5a',
-    other:   '#6b7fa0',
+    work:    '#B9720F',
+    person:  '#2A4B7C',
+    sound:   '#1F8A6F',
+    concept: '#7C5CB0',
+    series:  '#B23A48',
+    other:   '#7A7566',
 };
 const TYPE_LABEL = {
     work: 'dbo:Work', person: 'foaf:Person',
@@ -15,8 +15,12 @@ const TYPE_LABEL = {
     series: 'Series', other: 'Resource',
 };
 
-function typeColor(t) { return TYPE_COLOR[t] || TYPE_COLOR.other; }
+const INK       = '#211D17';
+const INK_FAINT = '#9A9384';
+const LINE      = '#D9D2BF';
+const ACCENT    = '#2A4B7C';
 
+function typeColor(t) { return TYPE_COLOR[t] || TYPE_COLOR.other; }
 
 // ═══════════════════════════════════════════════════════
 //  PHYSICS GRAPH ENGINE
@@ -76,8 +80,8 @@ async function initGraph() {
     } catch (err) {
         console.error('Failed to load graph data:', err);
         document.getElementById('graph-loading').innerHTML =
-            `<div style="color:#f04f5a;font-family:monospace;font-size:12px;">
-                Failed to load graph data.<br>${err.message}
+            `<div style="color:#B23A48;font-family:'JetBrains Mono',monospace;font-size:12px;">
+                Couldn't load the graph.<br>${err.message}
             </div>`;
         return;
     }
@@ -141,9 +145,9 @@ function draw() {
     // edges
     edges.forEach(e => {
         const visible = isVisible(e.source) && isVisible(e.target);
-        ctx.globalAlpha = visible ? .35 : .05;
+        ctx.globalAlpha = visible ? .55 : .08;
         const isSel = selectedNode && (e.source === selectedNode || e.target === selectedNode);
-        ctx.strokeStyle = isSel ? '#4d9fff' : '#2a3650';
+        ctx.strokeStyle = isSel ? ACCENT : LINE;
         ctx.lineWidth   = isSel ? 1.5 : .8;
         ctx.setLineDash(isSel ? [] : [3,4]);
         ctx.beginPath();
@@ -159,7 +163,7 @@ function draw() {
             const my = (e.source.y + e.target.y) / 2;
             ctx.save();
             ctx.font = `${9/scale}px JetBrains Mono, monospace`;
-            ctx.fillStyle = '#6b7fa0';
+            ctx.fillStyle = '#8A8375';
             ctx.textAlign = 'center';
             ctx.fillText(e.rel, mx, my - 4);
             ctx.restore();
@@ -169,7 +173,7 @@ function draw() {
     // nodes
     nodes.forEach(n => {
         const vis = isVisible(n);
-        ctx.globalAlpha = vis ? 1 : .12;
+        ctx.globalAlpha = vis ? 1 : .15;
         const col   = typeColor(n.type);
         const isHov = n === hoveredNode;
         const isSel = n === selectedNode;
@@ -178,7 +182,7 @@ function draw() {
         // glow
         if (isHov || isSel) {
             ctx.shadowColor = col;
-            ctx.shadowBlur  = isSel ? 20 : 12;
+            ctx.shadowBlur  = isSel ? 16 : 10;
         }
 
         // outer ring on selected
@@ -187,17 +191,17 @@ function draw() {
             ctx.arc(n.x, n.y, r + 4, 0, Math.PI*2);
             ctx.strokeStyle = col;
             ctx.lineWidth   = 1.5;
-            ctx.globalAlpha = .4;
+            ctx.globalAlpha = .5;
             ctx.stroke();
-            ctx.globalAlpha = vis ? 1 : .12;
+            ctx.globalAlpha = vis ? 1 : .15;
         }
 
         // fill
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI*2);
         const grad = ctx.createRadialGradient(n.x - r*.3, n.y - r*.3, 0, n.x, n.y, r);
-        grad.addColorStop(0, col + 'dd');
-        grad.addColorStop(1, col + '66');
+        grad.addColorStop(0, col + 'ee');
+        grad.addColorStop(1, col + 'aa');
         ctx.fillStyle = grad;
         ctx.fill();
 
@@ -208,9 +212,8 @@ function draw() {
         ctx.shadowBlur  = 0;
 
         // label
-        const labelScale = Math.max(.7, Math.min(1, scale));
-        ctx.font = `${(isHov || isSel ? 600 : 400)} ${11 / scale}px Inter, sans-serif`;
-        ctx.fillStyle = isHov || isSel ? '#e8f0ff' : '#8899bb';
+        ctx.font = `${(isHov || isSel ? 600 : 500)} ${11 / scale}px Inter, sans-serif`;
+        ctx.fillStyle = isHov || isSel ? INK : INK_FAINT;
         ctx.textAlign = 'center';
         const shortLabel = n.label.length > 22 ? n.label.slice(0, 22) + '…' : n.label;
         ctx.fillText(shortLabel, n.x, n.y + r + 14/scale);
