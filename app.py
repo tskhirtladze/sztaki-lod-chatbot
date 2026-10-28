@@ -20,10 +20,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import io
 import base64
 import hashlib
+from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")  # headless — this runs inside a Flask server process, no display
 import matplotlib.pyplot as plt
 from knowledge_graph import *
+from pdf_export import build_chat_pdf
 
 
 try:
@@ -1137,15 +1139,20 @@ def history():
     keeps its own chart — these are no longer read from the top-level state,
     which only ever reflects the most recent turn.
     """
+    return jsonify({"messages": _load_history_messages()})
+
+
+def _load_history_messages() -> list:
+    """Messages saved for the current session's thread, as plain dicts."""
     thread_id = session.get("thread_id")
     if not thread_id:
-        return jsonify({"messages": []})
+        return []
 
     config = {"configurable": {"thread_id": thread_id}}
     try:
         full_state = langgraph_app.get_state(config)
     except Exception:
-        return jsonify({"messages": []})
+        return []
 
     state_vals = full_state.values if full_state else {}
     raw_messages = state_vals.get("messages", [])
@@ -1163,7 +1170,27 @@ def history():
                 "viz": kwargs.get("viz"),
             })
 
-    return jsonify({"messages": out})
+    return out
+
+
+@app.route("/export/pdf", methods=["GET"])
+def export_pdf():
+    """Download the current conversation (answers + charts) as a PDF."""
+    messages = _load_history_messages()
+    if not messages:
+        return jsonify({"error": "There is no conversation to export yet."}), 404
+    try:
+        pdf_bytes = build_chat_pdf(messages)
+    except Exception as e:
+        print(f"[PDF EXPORT ERROR] {e}")
+        return jsonify({"error": "Could not build the PDF."}), 500
+
+    filename = f"nda-conversation-{datetime.now().strftime('%Y-%m-%d-%H%M')}.pdf"
+    return Response(
+        pdf_bytes,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/reset", methods=["POST"])
