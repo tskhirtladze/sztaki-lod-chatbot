@@ -9,6 +9,7 @@ const chatInput   = document.getElementById('chat-input');
 const sendBtn     = document.getElementById('send-btn');
 const resetBtn    = document.getElementById('reset-btn');
 const introBar    = document.getElementById('chat-intro-bar');
+const exportBtn   = document.getElementById('export-pdf-btn');
 
 let streaming = false;
 
@@ -59,11 +60,96 @@ resetBtn.addEventListener('click', async () => {
         console.error('Failed to reset conversation:', err);
     }
     chatLog.innerHTML = '';
+    exportBtn.disabled = true;
     chatLog.classList.remove('visible');
     introBar.classList.add('hidden');
     emptyState.classList.remove('hidden');
     chatInput.focus();
 });
+
+// ── Export conversation as PDF ──────────────────────────
+// The PDF is built server-side (/export/pdf) from the saved conversation,
+// so it includes every answer and chart, even ones restored from history.
+exportBtn.addEventListener('click', async () => {
+    if (streaming || exportBtn.disabled) return;
+    const label = exportBtn.textContent;
+    exportBtn.disabled = true;
+    exportBtn.textContent = 'Preparing PDF…';
+    try {
+        const resp = await fetch('/export/pdf');
+        if (!resp.ok) {
+            let msg = `Export failed (${resp.status})`;
+            try { msg = (await resp.json()).error || msg; } catch (_) {}
+            throw new Error(msg);
+        }
+        const blob = await resp.blob();
+        const disposition = resp.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="([^"]+)"/);
+        triggerBlobDownload(blob, match ? match[1] : 'nda-conversation.pdf');
+        exportBtn.textContent = label;
+    } catch (err) {
+        console.error('PDF export failed:', err);
+        exportBtn.textContent = 'Export failed — try again';
+        setTimeout(() => { exportBtn.textContent = label; }, 3000);
+    } finally {
+        exportBtn.disabled = !chatLog.children.length;
+    }
+});
+
+// ── Downloads (charts + PDF) ────────────────────────────
+function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// "Works Published by Year" -> "works-published-by-year"
+function slugify(text) {
+    const slug = (text || '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // drop accents (ő -> o)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60);
+    return slug || 'chart';
+}
+
+// Charts arrive as PNG data URIs (rendered by Matplotlib on the server).
+// PNG is saved as-is; JPEG is redrawn on a canvas over a white background,
+// because JPEG has no transparency and see-through areas would turn black.
+async function downloadChart(dataUri, title, format) {
+    const base = slugify(title);
+    try {
+        if (format === 'png') {
+            const blob = await (await fetch(dataUri)).blob();
+            triggerBlobDownload(blob, `${base}.png`);
+            return;
+        }
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = dataUri;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob(blob => {
+            if (blob) triggerBlobDownload(blob, `${base}.jpg`);
+        }, 'image/jpeg', 0.95);
+    } catch (err) {
+        console.error('Chart download failed:', err);
+    }
+}
 
 // ── Message rendering helpers ───────────────────────────
 function showChatLog() {
@@ -111,6 +197,7 @@ function renderFinal(el, { response, sparql_query, viz }) {
     const sparqlEl  = el.querySelector('.chat-sparql');
 
     if (statusEl) statusEl.remove();
+    exportBtn.disabled = false;
 
     answerEl.style.display = '';
     answerEl.innerHTML = renderMarkdownish(response || 'No response generated.');
@@ -119,8 +206,17 @@ function renderFinal(el, { response, sparql_query, viz }) {
         vizEl.style.display = '';
         vizEl.innerHTML = `
             <img class="chat-viz-image" src="${viz.image}" alt="${escapeHtml(viz.title || 'Chart')}">
-            ${viz.description ? `<div class="chat-viz-caption">${escapeHtml(viz.description)}</div>` : ''}
+            <div class="chat-viz-footer">
+                ${viz.description ? `<div class="chat-viz-caption">${escapeHtml(viz.description)}</div>` : ''}
+                <div class="chat-viz-downloads">
+                    <button type="button" class="chat-viz-dl" data-format="png" title="Download chart as PNG">⬇ PNG</button>
+                    <button type="button" class="chat-viz-dl" data-format="jpeg" title="Download chart as JPEG">⬇ JPEG</button>
+                </div>
+            </div>
         `;
+        vizEl.querySelectorAll('.chat-viz-dl').forEach(btn => {
+            btn.addEventListener('click', () => downloadChart(viz.image, viz.title, btn.dataset.format));
+        });
     }
 
     if (sparql_query) {
@@ -206,6 +302,7 @@ async function sendMessage(text) {
 
     streaming = true;
     sendBtn.disabled = true;
+    exportBtn.disabled = true;
 
     try {
         const resp = await fetch('/chat/stream', {
@@ -241,6 +338,7 @@ async function sendMessage(text) {
     } finally {
         streaming = false;
         sendBtn.disabled = false;
+        exportBtn.disabled = !chatLog.querySelector('.chat-message-assistant .chat-answer:not([style*="none"])');
     }
 }
 

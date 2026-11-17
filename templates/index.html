@@ -72,6 +72,40 @@
         color: #7A7566;
         margin-top: 4px;
     }
+    .chat-viz-footer {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+    }
+    .chat-viz-downloads {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+        margin-left: auto;
+    }
+    .chat-viz-dl {
+        font: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: .03em;
+        color: #2A4B7C;
+        background: #fff;
+        border: 1px solid #D9D2BF;
+        border-radius: 6px;
+        padding: 3px 9px;
+        cursor: pointer;
+    }
+    .chat-viz-dl:hover {
+        background: #2A4B7C;
+        border-color: #2A4B7C;
+        color: #fff;
+    }
+    #export-pdf-btn:disabled {
+        opacity: .45;
+        cursor: not-allowed;
+    }
     .sparql-details {
         margin-top: 10px;
         font-size: 12px;
@@ -177,6 +211,7 @@
             <span class="composer-hint">Answers are grounded in the archive's catalogue - it won't guess beyond what's recorded.</span>
             <div class="composer-actions">
                 <a href="{{ url_for('graph') }}">Explore as a graph</a>
+                <button type="button" id="export-pdf-btn" title="Download this conversation, with its charts, as a PDF" disabled>Export as PDF</button>
                 <button type="button" id="reset-btn">New conversation</button>
             </div>
         </div>
